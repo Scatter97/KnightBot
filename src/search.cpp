@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <vector>
 
@@ -13,86 +14,48 @@ namespace chess {
 
     namespace {
 
-        constexpr int INF =
-            32000;
-
-        constexpr int MAX_PLY =
-            128;
-
-        constexpr int MAX_QPLY =
-            8;
-
-        constexpr int DELTA_MARGIN =
-            150;
-
+        constexpr int INF = 32000;
+        constexpr int MAX_PLY = 128;
+        constexpr int MAX_QPLY = 8;
+        constexpr int DELTA_MARGIN = 150;
 
         // ============================================================
         // FIXED-SIZE TRANSPOSITION TABLE
         // ============================================================
 
-        constexpr std::size_t TT_SIZE =
-            1ULL << 20;
+        constexpr std::size_t TT_SIZE = 1ULL << 20;
+        constexpr std::size_t TT_MASK = TT_SIZE - 1;
 
-        constexpr std::size_t TT_MASK =
-            TT_SIZE - 1;
-
-
-        enum class TTFlag :
-            std::uint8_t
-        {
+        enum class TTFlag : std::uint8_t {
             Exact,
             LowerBound,
             UpperBound
         };
 
-
         struct TTEntry {
-
             std::uint64_t key = 0;
-
             int score = 0;
-
             int depth = -1;
 
-            TTFlag flag =
-                TTFlag::Exact;
+            TTFlag flag = TTFlag::Exact;
 
             Move bestMove{};
-
             bool valid = false;
         };
 
+        std::array<TTEntry, TT_SIZE> transpositionTable{};
+        std::size_t ttUsed = 0;
 
-        std::array<
-            TTEntry,
-            TT_SIZE
-        > transpositionTable{};
-
-
-        std::size_t ttUsed =
-            0;
-
-
-        TTEntry* probeTT(
-            std::uint64_t key
-        ) {
+        TTEntry* probeTT(std::uint64_t key) {
             TTEntry& entry =
-                transpositionTable[
-                    key &
-                        TT_MASK
-                ];
+                transpositionTable[key & TT_MASK];
 
-            if (
-                entry.valid &&
-                entry.key == key
-                ) {
-                return
-                    &entry;
+            if (entry.valid && entry.key == key) {
+                return &entry;
             }
 
             return nullptr;
         }
-
 
         void storeTT(
             std::uint64_t key,
@@ -102,54 +65,31 @@ namespace chess {
             const Move& move
         ) {
             TTEntry& entry =
-                transpositionTable[
-                    key &
-                        TT_MASK
-                ];
+                transpositionTable[key & TT_MASK];
 
-
-            if (
-                !entry.valid
-                ) {
+            if (!entry.valid) {
                 ++ttUsed;
             }
-
 
             if (
                 !entry.valid ||
                 entry.key != key ||
                 depth >= entry.depth
                 ) {
-                entry.key =
-                    key;
-
-                entry.depth =
-                    depth;
-
-                entry.score =
-                    score;
-
-                entry.flag =
-                    flag;
-
-                entry.bestMove =
-                    move;
-
-                entry.valid =
-                    true;
+                entry.key = key;
+                entry.depth = depth;
+                entry.score = score;
+                entry.flag = flag;
+                entry.bestMove = move;
+                entry.valid = true;
             }
         }
-
 
         // ============================================================
         // KILLERS / HISTORY
         // ============================================================
 
-        std::array<
-            std::array<Move, 2>,
-            MAX_PLY
-        > killerMoves{};
-
+        std::array<std::array<Move, 2>, MAX_PLY> killerMoves{};
 
         std::array<
             std::array<
@@ -159,30 +99,62 @@ namespace chess {
             2
         > historyTable{};
 
-
         // ============================================================
         // SEARCH CONTEXT
         // ============================================================
 
         struct SearchContext {
+            std::uint64_t nodes = 0;
 
-            std::uint64_t nodes =
-                0;
+            bool useDeadline = false;
 
-            bool useDeadline =
-                false;
+            std::chrono::steady_clock::time_point deadline{};
 
-            std::chrono::steady_clock::time_point
-                deadline{};
-
-            bool stopped =
-                false;
+            bool stopped = false;
         };
 
+        // ============================================================
+        // BASIC HELPERS
+        // ============================================================
 
-        // ============================================================
-        // HELPERS
-        // ============================================================
+        int fileOf(int square) {
+            return square & 7;
+        }
+
+        int rankOf(int square) {
+            return square >> 3;
+        }
+
+        bool onBoard(int file, int rank) {
+            return
+                file >= 0 &&
+                file < 8 &&
+                rank >= 0 &&
+                rank < 8;
+        }
+
+        bool isWhitePiece(char piece) {
+            return
+                piece >= 'A' &&
+                piece <= 'Z';
+        }
+
+        bool isBlackPiece(char piece) {
+            return
+                piece >= 'a' &&
+                piece <= 'z';
+        }
+
+        bool pieceBelongsToSide(
+            char piece,
+            bool white
+        ) {
+            if (white) {
+                return isWhitePiece(piece);
+            }
+
+            return isBlackPiece(piece);
+        }
 
         bool sameMove(
             const Move& a,
@@ -196,7 +168,6 @@ namespace chess {
                 a.castle == b.castle;
         }
 
-
         bool validStoredMove(
             const Move& move
         ) {
@@ -207,39 +178,28 @@ namespace chess {
                 move.to < 64;
         }
 
-
         bool isCapture(
             const Position& pos,
             const Move& move
         ) {
             return
                 move.enPassant ||
-                pos.board[
-                    move.to
-                ] !=
-                '.';
+                pos.board[move.to] != '.';
         }
-
 
         char capturedPieceForMove(
             const Position& pos,
             const Move& move
         ) {
-            if (
-                move.enPassant
-                ) {
+            if (move.enPassant) {
                 return
                     pos.whiteToMove
                     ? 'p'
                     : 'P';
             }
 
-            return
-                pos.board[
-                    move.to
-                ];
+            return pos.board[move.to];
         }
-
 
         // ============================================================
         // TIME
@@ -248,40 +208,614 @@ namespace chess {
         bool timeExpired(
             SearchContext& context
         ) {
+            if (!context.useDeadline) {
+                return false;
+            }
+
             if (
-                !context.useDeadline
+                (context.nodes & 4095ULL) != 0
                 ) {
                 return false;
             }
 
-
             if (
-                (
-                    context.nodes &
-                    4095ULL
-                    )
-                !=
-                0
-                ) {
-                return false;
-            }
-
-
-            if (
-                std::chrono::steady_clock::now()
-                >=
+                std::chrono::steady_clock::now() >=
                 context.deadline
                 ) {
-                context.stopped =
-                    true;
-
+                context.stopped = true;
                 return true;
             }
-
 
             return false;
         }
 
+        // ============================================================
+        // STATIC EXCHANGE EVALUATION
+        // ============================================================
+        //
+        // SEE asks:
+        //
+        // "If this capture happens, and both sides keep making the
+        // best captures on this square, what is the material result?"
+        //
+        // This implementation works on a tiny temporary board and
+        // recursively considers recaptures.
+        //
+        // It also checks king legality after each exchange, meaning
+        // pinned attackers and illegal king captures are rejected.
+        // ============================================================
+
+        using SeeBoard = std::array<char, 64>;
+
+        bool seePieceAttacksSquare(
+            const SeeBoard& board,
+            int from,
+            int target
+        ) {
+            const char piece = board[from];
+
+            if (piece == '.') {
+                return false;
+            }
+
+            const int fromFile = fileOf(from);
+            const int fromRank = rankOf(from);
+
+            const int targetFile = fileOf(target);
+            const int targetRank = rankOf(target);
+
+            const int df =
+                targetFile - fromFile;
+
+            const int dr =
+                targetRank - fromRank;
+
+            const char type =
+                static_cast<char>(
+                    std::tolower(
+                        static_cast<unsigned char>(piece)
+                    )
+                    );
+
+            // --------------------------------------------------------
+            // PAWN
+            // --------------------------------------------------------
+
+            if (type == 'p') {
+                if (isWhitePiece(piece)) {
+                    return
+                        dr == 1 &&
+                        std::abs(df) == 1;
+                }
+
+                return
+                    dr == -1 &&
+                    std::abs(df) == 1;
+            }
+
+            // --------------------------------------------------------
+            // KNIGHT
+            // --------------------------------------------------------
+
+            if (type == 'n') {
+                return
+                    (
+                        std::abs(df) == 1 &&
+                        std::abs(dr) == 2
+                        )
+                    ||
+                    (
+                        std::abs(df) == 2 &&
+                        std::abs(dr) == 1
+                        );
+            }
+
+            // --------------------------------------------------------
+            // KING
+            // --------------------------------------------------------
+
+            if (type == 'k') {
+                return
+                    std::abs(df) <= 1 &&
+                    std::abs(dr) <= 1 &&
+                    (
+                        df != 0 ||
+                        dr != 0
+                        );
+            }
+
+            // --------------------------------------------------------
+            // SLIDING PIECES
+            // --------------------------------------------------------
+
+            int stepFile = 0;
+            int stepRank = 0;
+
+            if (
+                type == 'b' ||
+                type == 'q'
+                ) {
+                if (
+                    std::abs(df) ==
+                    std::abs(dr)
+                    &&
+                    df != 0
+                    ) {
+                    stepFile =
+                        df > 0
+                        ? 1
+                        : -1;
+
+                    stepRank =
+                        dr > 0
+                        ? 1
+                        : -1;
+                }
+            }
+
+            if (
+                stepFile == 0 &&
+                stepRank == 0 &&
+                (
+                    type == 'r' ||
+                    type == 'q'
+                    )
+                ) {
+                if (
+                    df == 0 &&
+                    dr != 0
+                    ) {
+                    stepFile = 0;
+
+                    stepRank =
+                        dr > 0
+                        ? 1
+                        : -1;
+                }
+
+                else if (
+                    dr == 0 &&
+                    df != 0
+                    ) {
+                    stepFile =
+                        df > 0
+                        ? 1
+                        : -1;
+
+                    stepRank = 0;
+                }
+            }
+
+            if (
+                stepFile == 0 &&
+                stepRank == 0
+                ) {
+                return false;
+            }
+
+            int file =
+                fromFile +
+                stepFile;
+
+            int rank =
+                fromRank +
+                stepRank;
+
+            while (
+                onBoard(file, rank)
+                ) {
+                const int square =
+                    rank * 8 +
+                    file;
+
+                if (
+                    square == target
+                    ) {
+                    return true;
+                }
+
+                if (
+                    board[square] != '.'
+                    ) {
+                    return false;
+                }
+
+                file += stepFile;
+                rank += stepRank;
+            }
+
+            return false;
+        }
+
+        // ============================================================
+        // LOCAL SEE ATTACK CHECK
+        // ============================================================
+
+        bool seeSquareAttacked(
+            const SeeBoard& board,
+            int target,
+            bool byWhite
+        ) {
+            for (
+                int square = 0;
+                square < 64;
+                ++square
+                ) {
+                const char piece =
+                    board[square];
+
+                if (
+                    piece == '.' ||
+                    !pieceBelongsToSide(
+                        piece,
+                        byWhite
+                    )
+                    ) {
+                    continue;
+                }
+
+                if (
+                    seePieceAttacksSquare(
+                        board,
+                        square,
+                        target
+                    )
+                    ) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        int seeKingSquare(
+            const SeeBoard& board,
+            bool white
+        ) {
+            const char king =
+                white
+                ? 'K'
+                : 'k';
+
+            for (
+                int square = 0;
+                square < 64;
+                ++square
+                ) {
+                if (
+                    board[square] == king
+                    ) {
+                    return square;
+                }
+            }
+
+            return -1;
+        }
+
+        bool seeKingSafe(
+            const SeeBoard& board,
+            bool white
+        ) {
+            const int kingSquare =
+                seeKingSquare(
+                    board,
+                    white
+                );
+
+            // Invalid/test FEN with no king:
+            // do not make SEE explode.
+            if (
+                kingSquare < 0
+                ) {
+                return true;
+            }
+
+            return
+                !seeSquareAttacked(
+                    board,
+                    kingSquare,
+                    !white
+                );
+        }
+
+        // ============================================================
+        // PROMOTION DURING SEE
+        // ============================================================
+
+        char seePromotionPiece(
+            char pawn,
+            int target
+        ) {
+            const int rank =
+                rankOf(target);
+
+            if (
+                pawn == 'P' &&
+                rank == 7
+                ) {
+                return 'Q';
+            }
+
+            if (
+                pawn == 'p' &&
+                rank == 0
+                ) {
+                return 'q';
+            }
+
+            return pawn;
+        }
+
+        // ============================================================
+        // RECURSIVE EXCHANGE
+        // ============================================================
+        //
+        // Returns the best material gain that `whiteToCapture` can
+        // obtain by choosing whether or not to capture the piece
+        // currently sitting on `target`.
+        //
+        // 0 means "decline the exchange."
+        // ============================================================
+
+        int seeRecapture(
+            SeeBoard& board,
+            int target,
+            bool whiteToCapture
+        ) {
+            const char victim =
+                board[target];
+
+            if (
+                victim == '.'
+                ) {
+                return 0;
+            }
+
+            int bestGain = 0;
+
+            for (
+                int from = 0;
+                from < 64;
+                ++from
+                ) {
+                const char attacker =
+                    board[from];
+
+                if (
+                    attacker == '.' ||
+                    !pieceBelongsToSide(
+                        attacker,
+                        whiteToCapture
+                    )
+                    ) {
+                    continue;
+                }
+
+                if (
+                    !seePieceAttacksSquare(
+                        board,
+                        from,
+                        target
+                    )
+                    ) {
+                    continue;
+                }
+
+                const char oldTarget =
+                    board[target];
+
+                const char promotedAttacker =
+                    seePromotionPiece(
+                        attacker,
+                        target
+                    );
+
+                board[from] = '.';
+                board[target] =
+                    promotedAttacker;
+
+                // Reject pinned pieces and illegal king captures.
+                if (
+                    !seeKingSafe(
+                        board,
+                        whiteToCapture
+                    )
+                    ) {
+                    board[from] =
+                        attacker;
+
+                    board[target] =
+                        oldTarget;
+
+                    continue;
+                }
+
+                int promotionBonus = 0;
+
+                if (
+                    promotedAttacker !=
+                    attacker
+                    ) {
+                    promotionBonus =
+                        pieceValue(
+                            promotedAttacker
+                        )
+                        -
+                        pieceValue(
+                            attacker
+                        );
+                }
+
+                const int gain =
+                    pieceValue(
+                        oldTarget
+                    )
+                    +
+                    promotionBonus
+                    -
+                    seeRecapture(
+                        board,
+                        target,
+                        !whiteToCapture
+                    );
+
+                board[from] =
+                    attacker;
+
+                board[target] =
+                    oldTarget;
+
+                if (
+                    gain > bestGain
+                    ) {
+                    bestGain =
+                        gain;
+                }
+            }
+
+            // A side is never forced to make a losing recapture.
+            return std::max(
+                0,
+                bestGain
+            );
+        }
+
+        // ============================================================
+        // PUBLIC-INTERNAL SEE SCORE
+        // ============================================================
+        //
+        // Positive = capture wins material.
+        // Zero     = roughly breaks even.
+        // Negative = capture loses material.
+        // ============================================================
+
+        int staticExchangeEvaluation(
+            const Position& pos,
+            const Move& move
+        ) {
+            if (
+                !isCapture(
+                    pos,
+                    move
+                )
+                &&
+                !move.promotion
+                ) {
+                return 0;
+            }
+
+            SeeBoard board =
+                pos.board;
+
+            const char movingPiece =
+                board[move.from];
+
+            if (
+                movingPiece == '.'
+                ) {
+                return 0;
+            }
+
+            const bool movingWhite =
+                isWhitePiece(
+                    movingPiece
+                );
+
+            int capturedSquare =
+                move.to;
+
+            char capturedPiece =
+                board[move.to];
+
+            if (
+                move.enPassant
+                ) {
+                capturedSquare =
+                    move.to +
+                    (
+                        movingWhite
+                        ? -8
+                        : 8
+                        );
+
+                capturedPiece =
+                    board[capturedSquare];
+
+                board[capturedSquare] =
+                    '.';
+            }
+
+            int immediateGain = 0;
+
+            if (
+                capturedPiece != '.'
+                ) {
+                immediateGain =
+                    pieceValue(
+                        capturedPiece
+                    );
+            }
+
+            board[move.from] =
+                '.';
+
+            char destinationPiece =
+                movingPiece;
+
+            if (
+                move.promotion
+                ) {
+                destinationPiece =
+                    movingWhite
+                    ? static_cast<char>(
+                        std::toupper(
+                            static_cast<unsigned char>(
+                                move.promotion
+                                )
+                        )
+                        )
+                    : static_cast<char>(
+                        std::tolower(
+                            static_cast<unsigned char>(
+                                move.promotion
+                                )
+                        )
+                        );
+
+                immediateGain +=
+                    pieceValue(
+                        destinationPiece
+                    )
+                    -
+                    pieceValue(
+                        movingPiece
+                    );
+            }
+
+            board[move.to] =
+                destinationPiece;
+
+            // If the initial move itself is illegal, make SEE very bad.
+            if (
+                !seeKingSafe(
+                    board,
+                    movingWhite
+                )
+                ) {
+                return -MATE_SCORE;
+            }
+
+            const int opponentGain =
+                seeRecapture(
+                    board,
+                    move.to,
+                    !movingWhite
+                );
+
+            return
+                immediateGain -
+                opponentGain;
+        }
 
         // ============================================================
         // MOVE ORDERING
@@ -295,7 +829,6 @@ namespace chess {
         ) {
             int score = 0;
 
-
             if (
                 ttMove != nullptr &&
                 sameMove(
@@ -303,16 +836,11 @@ namespace chess {
                     *ttMove
                 )
                 ) {
-                score +=
-                    1000000;
+                score += 1000000;
             }
 
-
             const char movingPiece =
-                pos.board[
-                    move.from
-                ];
-
+                pos.board[move.from];
 
             const char capturedPiece =
                 capturedPieceForMove(
@@ -320,12 +848,10 @@ namespace chess {
                     move
                 );
 
-
             if (
                 move.promotion
                 ) {
-                score +=
-                    30000;
+                score += 30000;
 
                 score +=
                     pieceValue(
@@ -333,13 +859,27 @@ namespace chess {
                     );
             }
 
-
             if (
                 capturedPiece != '.'
                 ) {
-                score +=
-                    20000;
+                const int see =
+                    staticExchangeEvaluation(
+                        pos,
+                        move
+                    );
 
+                // Winning/equal captures before losing captures.
+                if (
+                    see >= 0
+                    ) {
+                    score += 25000;
+                }
+
+                else {
+                    score += 5000;
+                }
+
+                // MVV-LVA remains useful as a secondary ordering signal.
                 score +=
                     pieceValue(
                         capturedPiece
@@ -351,16 +891,18 @@ namespace chess {
                     pieceValue(
                         movingPiece
                     );
-            }
 
+                // SEE refines the ordering.
+                score +=
+                    see *
+                    4;
+            }
 
             if (
                 move.castle
                 ) {
-                score +=
-                    1000;
+                score += 1000;
             }
-
 
             if (
                 ply >= 0 &&
@@ -372,40 +914,29 @@ namespace chess {
                 ) {
                 if (
                     validStoredMove(
-                        killerMoves[
-                            ply
-                ][0]
-                                )
+                        killerMoves[ply][0]
+                    )
                     &&
                     sameMove(
                         move,
-                        killerMoves[
-                            ply
-                ][0]
-                                )
+                        killerMoves[ply][0]
+                    )
                     ) {
-                    score +=
-                        4000;
+                    score += 4000;
                 }
 
                 else if (
                     validStoredMove(
-                        killerMoves[
-                            ply
-                ][1]
-                                )
+                        killerMoves[ply][1]
+                    )
                     &&
                     sameMove(
                         move,
-                        killerMoves[
-                            ply
-                ][1]
-                                )
+                        killerMoves[ply][1]
+                    )
                     ) {
-                    score +=
-                        3000;
+                    score += 3000;
                 }
-
 
                 const int side =
                     pos.whiteToMove
@@ -422,10 +953,8 @@ namespace chess {
                     ];
             }
 
-
             return score;
         }
-
 
         void orderMoves(
             const Position& pos,
@@ -433,11 +962,8 @@ namespace chess {
             const Move* ttMove,
             int ply
         ) {
-            std::array<
-                int,
-                MAX_MOVES
-            > scores{};
-
+            std::array<int, MAX_MOVES>
+                scores{};
 
             for (
                 int i = 0;
@@ -448,25 +974,19 @@ namespace chess {
                     moveOrderScore(
                         pos,
                         moves[
-                            static_cast<
-                                std::size_t
-                            >(i)
+                            static_cast<std::size_t>(i)
                         ],
                         ttMove,
                         ply
                     );
             }
 
-
             for (
                 int i = 0;
-                i <
-                moves.count - 1;
+                i < moves.count - 1;
                 ++i
                 ) {
-                int bestIndex =
-                    i;
-
+                int bestIndex = i;
 
                 for (
                     int j = i + 1;
@@ -477,11 +997,9 @@ namespace chess {
                         scores[j] >
                         scores[bestIndex]
                         ) {
-                        bestIndex =
-                            j;
+                        bestIndex = j;
                     }
                 }
-
 
                 if (
                     bestIndex != i
@@ -491,23 +1009,17 @@ namespace chess {
                         scores[bestIndex]
                     );
 
-
                     std::swap(
                         moves[
-                            static_cast<
-                                std::size_t
-                            >(i)
+                            static_cast<std::size_t>(i)
                         ],
                         moves[
-                            static_cast<
-                                std::size_t
-                            >(bestIndex)
+                            static_cast<std::size_t>(bestIndex)
                         ]
                     );
                 }
             }
         }
-
 
         void recordKiller(
             const Position& pos,
@@ -526,34 +1038,23 @@ namespace chess {
                 return;
             }
 
-
             if (
                 !sameMove(
                     move,
-                    killerMoves[
-                        ply
-            ][0]
-                            )
+                    killerMoves[ply][0]
+                )
                 ) {
-                killerMoves[
-                    ply
-                ][1] =
-                        killerMoves[
-                            ply
-                        ][0];
+                killerMoves[ply][1] =
+                    killerMoves[ply][0];
 
-                    killerMoves[
-                        ply
-                    ][0] =
-                            move;
+                killerMoves[ply][0] =
+                    move;
             }
-
 
             const int side =
                 pos.whiteToMove
                 ? 0
                 : 1;
-
 
             int& history =
                 historyTable[
@@ -564,94 +1065,17 @@ namespace chess {
                     move.to
                 ];
 
-
                     history +=
                         depth *
                         depth;
-
 
                     if (
                         history >
                         100000
                         ) {
-                        history /=
-                            2;
+                        history /= 2;
                     }
         }
-
-
-        // ============================================================
-        // BAD CAPTURE FILTER
-        // ============================================================
-
-        bool clearlyBadCapture(
-            Position& pos,
-            const Move& move
-        ) {
-            if (
-                !isCapture(
-                    pos,
-                    move
-                )
-                ||
-                move.promotion
-                ) {
-                return false;
-            }
-
-
-            const char attacker =
-                pos.board[
-                    move.from
-                ];
-
-
-            const char victim =
-                capturedPieceForMove(
-                    pos,
-                    move
-                );
-
-
-            if (
-                pieceValue(attacker)
-                <=
-                pieceValue(victim)
-                +
-                100
-                ) {
-                return false;
-            }
-
-
-            UndoState undo;
-
-
-            makeMove(
-                pos,
-                move,
-                undo
-            );
-
-
-            const bool attacked =
-                isSquareAttacked(
-                    pos,
-                    move.to,
-                    pos.whiteToMove
-                );
-
-
-            undoMove(
-                pos,
-                move,
-                undo
-            );
-
-
-            return attacked;
-        }
-
 
         // ============================================================
         // QUIESCENCE
@@ -667,7 +1091,6 @@ namespace chess {
         ) {
             ++context.nodes;
 
-
             if (
                 timeExpired(
                     context
@@ -676,22 +1099,18 @@ namespace chess {
                 return 0;
             }
 
-
             const bool checked =
                 inCheck(
                     pos,
                     pos.whiteToMove
                 );
 
-
             MoveList moves;
-
 
             generateLegalMoves(
                 pos,
                 moves
             );
-
 
             if (
                 moves.empty()
@@ -707,7 +1126,6 @@ namespace chess {
                 return 0;
             }
 
-
             if (
                 qply >=
                 MAX_QPLY
@@ -718,9 +1136,8 @@ namespace chess {
                     );
             }
 
-
             // ========================================================
-            // IN CHECK
+            // IN CHECK: ALL LEGAL EVASIONS
             // ========================================================
 
             if (
@@ -733,20 +1150,17 @@ namespace chess {
                     ply
                 );
 
-
                 for (
                     const Move& move :
                     moves
                     ) {
                     UndoState undo;
 
-
                     makeMove(
                         pos,
                         move,
                         undo
                     );
-
 
                     const int score =
                         -quiescence(
@@ -758,13 +1172,11 @@ namespace chess {
                             context
                         );
 
-
                     undoMove(
                         pos,
                         move,
                         undo
                     );
-
 
                     if (
                         context.stopped
@@ -772,26 +1184,21 @@ namespace chess {
                         return 0;
                     }
 
-
                     if (
                         score >= beta
                         ) {
                         return score;
                     }
 
-
                     if (
                         score > alpha
                         ) {
-                        alpha =
-                            score;
+                        alpha = score;
                     }
                 }
 
-
                 return alpha;
             }
-
 
             // ========================================================
             // STAND PAT
@@ -802,22 +1209,17 @@ namespace chess {
                     pos
                 );
 
-
             if (
                 standPat >= beta
                 ) {
-                return
-                    standPat;
+                return standPat;
             }
-
 
             if (
                 standPat > alpha
                 ) {
-                alpha =
-                    standPat;
+                alpha = standPat;
             }
-
 
             // ========================================================
             // TACTICAL MOVES
@@ -825,29 +1227,29 @@ namespace chess {
 
             MoveList tactical;
 
-
             for (
                 const Move& move :
                 moves
                 ) {
-                if (
-                    !isCapture(
+                const bool capture =
+                    isCapture(
                         pos,
                         move
-                    )
-                    &&
+                    );
+
+                if (
+                    !capture &&
                     !move.promotion
                     ) {
                     continue;
                 }
 
+                // ----------------------------------------------------
+                // DELTA PRUNING
+                // ----------------------------------------------------
 
                 if (
-                    isCapture(
-                        pos,
-                        move
-                    )
-                    &&
+                    capture &&
                     !move.promotion
                     ) {
                     const int gain =
@@ -857,7 +1259,6 @@ namespace chess {
                                 move
                             )
                         );
-
 
                     if (
                         standPat +
@@ -870,22 +1271,33 @@ namespace chess {
                     }
                 }
 
+                // ----------------------------------------------------
+                // PROPER SEE PRUNING
+                // ----------------------------------------------------
+                //
+                // The old v0.5.x heuristic simply looked at attacker
+                // value + whether the square was attacked.
+                //
+                // Now we actually evaluate the exchange.
+                // ----------------------------------------------------
 
-                if (
-                    clearlyBadCapture(
+                const int see =
+                    staticExchangeEvaluation(
                         pos,
                         move
-                    )
+                    );
+
+                if (
+                    see < 0 &&
+                    !move.promotion
                     ) {
                     continue;
                 }
-
 
                 tactical.push_back(
                     move
                 );
             }
-
 
             orderMoves(
                 pos,
@@ -894,20 +1306,17 @@ namespace chess {
                 ply
             );
 
-
             for (
                 const Move& move :
                 tactical
                 ) {
                 UndoState undo;
 
-
                 makeMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 const int score =
                     -quiescence(
@@ -919,13 +1328,11 @@ namespace chess {
                         context
                     );
 
-
                 undoMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 if (
                     context.stopped
@@ -933,26 +1340,21 @@ namespace chess {
                     return 0;
                 }
 
-
                 if (
                     score >= beta
                     ) {
                     return score;
                 }
 
-
                 if (
                     score > alpha
                     ) {
-                    alpha =
-                        score;
+                    alpha = score;
                 }
             }
 
-
             return alpha;
         }
-
 
         // ============================================================
         // NEGAMAX
@@ -976,7 +1378,6 @@ namespace chess {
                     );
             }
 
-
             if (
                 depth <= 0
                 ) {
@@ -991,9 +1392,7 @@ namespace chess {
                     );
             }
 
-
             ++context.nodes;
-
 
             if (
                 timeExpired(
@@ -1003,29 +1402,23 @@ namespace chess {
                 return 0;
             }
 
-
             const int originalAlpha =
                 alpha;
 
             const int originalBeta =
                 beta;
 
-
             const std::uint64_t key =
                 pos.zobristKey;
 
-
             Move ttMove{};
 
-            bool hasTTMove =
-                false;
-
+            bool hasTTMove = false;
 
             TTEntry* ttEntry =
                 probeTT(
                     key
                 );
-
 
             if (
                 ttEntry != nullptr
@@ -1038,10 +1431,8 @@ namespace chess {
                     ttMove =
                         ttEntry->bestMove;
 
-                    hasTTMove =
-                        true;
+                    hasTTMove = true;
                 }
-
 
                 if (
                     ttEntry->depth >=
@@ -1054,7 +1445,6 @@ namespace chess {
                         return
                             ttEntry->score;
                     }
-
 
                     if (
                         ttEntry->flag ==
@@ -1078,7 +1468,6 @@ namespace chess {
                             );
                     }
 
-
                     if (
                         alpha >= beta
                         ) {
@@ -1088,15 +1477,12 @@ namespace chess {
                 }
             }
 
-
             MoveList moves;
-
 
             generateLegalMoves(
                 pos,
                 moves
             );
-
 
             if (
                 moves.empty()
@@ -1115,7 +1501,6 @@ namespace chess {
                 return 0;
             }
 
-
             orderMoves(
                 pos,
                 moves,
@@ -1125,14 +1510,11 @@ namespace chess {
                 ply
             );
 
-
             int bestScore =
                 -INF;
 
-
             Move bestMove =
                 moves.front();
-
 
             for (
                 const Move& move :
@@ -1140,13 +1522,11 @@ namespace chess {
                 ) {
                 UndoState undo;
 
-
                 makeMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 const int score =
                     -negamax(
@@ -1158,13 +1538,11 @@ namespace chess {
                         context
                     );
 
-
                 undoMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 if (
                     context.stopped
@@ -1172,27 +1550,20 @@ namespace chess {
                     return 0;
                 }
 
-
                 if (
                     score >
                     bestScore
                     ) {
-                    bestScore =
-                        score;
-
-                    bestMove =
-                        move;
+                    bestScore = score;
+                    bestMove = move;
                 }
-
 
                 if (
                     score >
                     alpha
                     ) {
-                    alpha =
-                        score;
+                    alpha = score;
                 }
-
 
                 if (
                     alpha >= beta
@@ -1208,9 +1579,7 @@ namespace chess {
                 }
             }
 
-
             TTFlag flag;
-
 
             if (
                 bestScore <=
@@ -1233,7 +1602,6 @@ namespace chess {
                     TTFlag::Exact;
             }
 
-
             storeTT(
                 key,
                 depth,
@@ -1242,10 +1610,8 @@ namespace chess {
                 bestMove
             );
 
-
             return bestScore;
         }
-
 
         // ============================================================
         // PRINCIPAL VARIATION
@@ -1257,15 +1623,11 @@ namespace chess {
         ) {
             std::vector<Move> pv;
 
-
             pv.reserve(
-                static_cast<
-                std::size_t
-                >(
+                static_cast<std::size_t>(
                     maxDepth
                     )
             );
-
 
             for (
                 int i = 0;
@@ -1277,7 +1639,6 @@ namespace chess {
                         pos.zobristKey
                     );
 
-
                 if (
                     entry == nullptr ||
                     !validStoredMove(
@@ -1287,23 +1648,17 @@ namespace chess {
                     break;
                 }
 
-
                 const Move move =
                     entry->bestMove;
 
-
                 MoveList legal;
-
 
                 generateLegalMoves(
                     pos,
                     legal
                 );
 
-
-                bool found =
-                    false;
-
+                bool found = false;
 
                 for (
                     const Move& candidate :
@@ -1315,13 +1670,10 @@ namespace chess {
                             candidate
                         )
                         ) {
-                        found =
-                            true;
-
+                        found = true;
                         break;
                     }
                 }
-
 
                 if (
                     !found
@@ -1329,11 +1681,9 @@ namespace chess {
                     break;
                 }
 
-
                 pv.push_back(
                     move
                 );
-
 
                 makeMove(
                     pos,
@@ -1341,10 +1691,8 @@ namespace chess {
                 );
             }
 
-
             return pv;
         }
-
 
         // ============================================================
         // ROOT SEARCH
@@ -1357,26 +1705,20 @@ namespace chess {
         ) {
             SearchResult result;
 
-
             result.depth =
                 depth;
 
-
             MoveList moves;
-
 
             generateLegalMoves(
                 pos,
                 moves
             );
 
-
             if (
                 moves.empty()
                 ) {
-                result.hasMove =
-                    false;
-
+                result.hasMove = false;
 
                 result.score =
                     inCheck(
@@ -1386,24 +1728,16 @@ namespace chess {
                     ? -MATE_SCORE
                     : 0;
 
-
                 return result;
             }
 
-
-            result.hasMove =
-                true;
-
+            result.hasMove = true;
 
             const std::uint64_t rootKey =
                 pos.zobristKey;
 
-
             Move ttMove{};
-
-            bool hasTTMove =
-                false;
-
+            bool hasTTMove = false;
 
             if (
                 TTEntry* entry =
@@ -1419,11 +1753,9 @@ namespace chess {
                     ttMove =
                         entry->bestMove;
 
-                    hasTTMove =
-                        true;
+                    hasTTMove = true;
                 }
             }
-
 
             orderMoves(
                 pos,
@@ -1434,22 +1766,16 @@ namespace chess {
                 0
             );
 
-
-            int alpha =
-                -INF;
-
+            int alpha = -INF;
 
             constexpr int beta =
                 INF;
 
-
             int bestScore =
                 -INF;
 
-
             Move bestMove =
                 moves.front();
-
 
             for (
                 const Move& move :
@@ -1457,13 +1783,11 @@ namespace chess {
                 ) {
                 UndoState undo;
 
-
                 makeMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 const int score =
                     -negamax(
@@ -1475,13 +1799,11 @@ namespace chess {
                         context
                     );
 
-
                 undoMove(
                     pos,
                     move,
                     undo
                 );
-
 
                 if (
                     context.stopped
@@ -1489,28 +1811,21 @@ namespace chess {
                     break;
                 }
 
-
                 if (
                     score >
                     bestScore
                     ) {
-                    bestScore =
-                        score;
-
-                    bestMove =
-                        move;
+                    bestScore = score;
+                    bestMove = move;
                 }
-
 
                 if (
                     score >
                     alpha
                     ) {
-                    alpha =
-                        score;
+                    alpha = score;
                 }
             }
-
 
             if (
                 !context.stopped
@@ -1518,10 +1833,8 @@ namespace chess {
                 result.bestMove =
                     bestMove;
 
-
                 result.score =
                     bestScore;
-
 
                 storeTT(
                     rootKey,
@@ -1531,7 +1844,6 @@ namespace chess {
                     bestMove
                 );
 
-
                 result.pv =
                     extractPV(
                         pos,
@@ -1539,10 +1851,8 @@ namespace chess {
                     );
             }
 
-
             return result;
         }
-
 
         // ============================================================
         // ITERATIVE DEEPENING
@@ -1557,40 +1867,31 @@ namespace chess {
             const auto start =
                 std::chrono::steady_clock::now();
 
-
             Position pos =
                 rootPosition;
 
-
             SearchContext context;
-
 
             context.useDeadline =
                 useDeadline;
 
-
             context.deadline =
                 deadline;
 
-
             SearchResult bestCompleted;
 
-
             MoveList rootMoves;
-
 
             generateLegalMoves(
                 pos,
                 rootMoves
             );
 
-
             if (
                 rootMoves.empty()
                 ) {
                 bestCompleted.hasMove =
                     false;
-
 
                 bestCompleted.score =
                     inCheck(
@@ -1600,28 +1901,22 @@ namespace chess {
                     ? -MATE_SCORE
                     : 0;
 
-
                 const auto end =
                     std::chrono::steady_clock::now();
-
 
                 bestCompleted.seconds =
                     std::chrono::duration<double>(
                         end - start
                     ).count();
 
-
                 return bestCompleted;
             }
-
 
             bestCompleted.hasMove =
                 true;
 
-
             bestCompleted.bestMove =
                 rootMoves.front();
-
 
             for (
                 int depth = 1;
@@ -1630,13 +1925,11 @@ namespace chess {
                 ) {
                 if (
                     useDeadline &&
-                    std::chrono::steady_clock::now()
-                    >=
+                    std::chrono::steady_clock::now() >=
                     deadline
                     ) {
                     break;
                 }
-
 
                 SearchResult current =
                     searchRoot(
@@ -1645,25 +1938,20 @@ namespace chess {
                         context
                     );
 
-
                 if (
                     context.stopped
                     ) {
                     break;
                 }
 
-
                 current.nodes =
                     context.nodes;
-
 
                 current.depth =
                     depth;
 
-
                 bestCompleted =
                     current;
-
 
                 if (
                     std::abs(
@@ -1676,38 +1964,30 @@ namespace chess {
                 }
             }
 
-
             const auto end =
                 std::chrono::steady_clock::now();
 
-
             bestCompleted.nodes =
                 context.nodes;
-
 
             bestCompleted.seconds =
                 std::chrono::duration<double>(
                     end - start
                 ).count();
 
-
             bestCompleted.stopped =
                 context.stopped;
-
 
             return bestCompleted;
         }
 
     } // anonymous namespace
 
-
-
     // ============================================================
     // PUBLIC API
     // ============================================================
 
     void clearTranspositionTable() {
-
         for (
             TTEntry& entry :
             transpositionTable
@@ -1716,26 +1996,15 @@ namespace chess {
                 TTEntry{};
         }
 
+        ttUsed = 0;
 
-        ttUsed =
-            0;
-
-
-        killerMoves =
-        {};
-
-
-        historyTable =
-        {};
+        killerMoves = {};
+        historyTable = {};
     }
-
 
     std::size_t transpositionTableSize() {
-
-        return
-            ttUsed;
+        return ttUsed;
     }
-
 
     SearchResult searchBestMove(
         const Position& pos,
@@ -1744,10 +2013,8 @@ namespace chess {
         if (
             maxDepth < 1
             ) {
-            maxDepth =
-                1;
+            maxDepth = 1;
         }
-
 
         return
             iterativeSearch(
@@ -1758,7 +2025,6 @@ namespace chess {
             );
     }
 
-
     SearchResult searchBestMoveTimed(
         const Position& pos,
         int milliseconds
@@ -1766,10 +2032,8 @@ namespace chess {
         if (
             milliseconds < 1
             ) {
-            milliseconds =
-                1;
+            milliseconds = 1;
         }
-
 
         const auto deadline =
             std::chrono::steady_clock::now()
@@ -1777,7 +2041,6 @@ namespace chess {
             std::chrono::milliseconds(
                 milliseconds
             );
-
 
         return
             iterativeSearch(
