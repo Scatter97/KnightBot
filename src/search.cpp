@@ -1872,6 +1872,19 @@ namespace chess {
             int qply,
             SearchContext& context
         ) {
+            // ========================================================
+            // INSUFFICIENT MATERIAL
+            // ========================================================
+
+            if (
+                isInsufficientMaterial(
+                    pos
+                )
+                ) {
+                return 0;
+            }
+
+
             ++context.nodes;
 
 
@@ -2174,6 +2187,10 @@ namespace chess {
         // NEGAMAX
         // ============================================================
 
+       // ============================================================
+// NEGAMAX
+// ============================================================
+
         int negamax(
             Position& pos,
             int depth,
@@ -2184,6 +2201,19 @@ namespace chess {
             bool allowNull,
             int checkExtensions
         ) {
+            // ========================================================
+            // INSUFFICIENT MATERIAL
+            // ========================================================
+
+            if (
+                isInsufficientMaterial(
+                    pos
+                )
+                ) {
+                return 0;
+            }
+
+
             // ========================================================
             // MAXIMUM SEARCH PLY
             // ========================================================
@@ -2301,7 +2331,6 @@ namespace chess {
                             );
                     }
 
-
                     else if (
                         ttEntry->flag ==
                         TTFlag::UpperBound
@@ -2357,8 +2386,7 @@ namespace chess {
 
 
                 const int reduction =
-                    NULL_MOVE_BASE_REDUCTION
-                    +
+                    NULL_MOVE_BASE_REDUCTION +
                     depth / 6;
 
 
@@ -2542,7 +2570,8 @@ namespace chess {
                         );
 
 
-                int score = 0;
+                int score =
+                    0;
 
 
                 // ====================================================
@@ -2631,8 +2660,6 @@ namespace chess {
                             );
 
 
-                        // Reduced move was interesting.
-                        // Verify it at full depth.
                         if (
                             score > alpha
                             ) {
@@ -2776,7 +2803,6 @@ namespace chess {
                     TTFlag::UpperBound;
             }
 
-
             else if (
                 bestScore >=
                 originalBeta
@@ -2784,7 +2810,6 @@ namespace chess {
                 flag =
                     TTFlag::LowerBound;
             }
-
 
             else {
                 flag =
@@ -2803,7 +2828,6 @@ namespace chess {
 
             return bestScore;
         }
-
 
         // ============================================================
         // PV EXTRACTION

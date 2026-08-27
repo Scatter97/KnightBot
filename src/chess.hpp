@@ -53,25 +53,33 @@ namespace chess {
             count = 0;
         }
 
-        void push_back(const Move& move) {
+        void push_back(
+            const Move& move
+        ) {
             if (count < MAX_MOVES) {
                 moves[count++] = move;
             }
         }
 
         std::size_t size() const {
-            return static_cast<std::size_t>(count);
+            return static_cast<std::size_t>(
+                count
+                );
         }
 
         bool empty() const {
             return count == 0;
         }
 
-        Move& operator[](std::size_t index) {
+        Move& operator[](
+            std::size_t index
+            ) {
             return moves[index];
         }
 
-        const Move& operator[](std::size_t index) const {
+        const Move& operator[](
+            std::size_t index
+            ) const {
             return moves[index];
         }
 
@@ -122,9 +130,15 @@ namespace chess {
     struct Position {
         std::array<char, 64> board{};
 
-        std::array<Bitboard, PIECE_COUNT> pieces{};
+        std::array<
+            Bitboard,
+            PIECE_COUNT
+        > pieces{};
 
-        std::array<Bitboard, 3> occupancy{};
+        std::array<
+            Bitboard,
+            3
+        > occupancy{};
 
         bool whiteToMove = true;
 
@@ -138,8 +152,6 @@ namespace chess {
         int halfmoveClock = 0;
         int fullmoveNumber = 1;
 
-        // New in v0.5.1:
-        // maintained incrementally by makeMove().
         std::uint64_t zobristKey = 0;
     };
 
@@ -165,13 +177,10 @@ namespace chess {
         const Position& pos
     );
 
-    // Convenience version for UI/SAN/etc.
     MoveList generateLegalMoves(
         const Position& pos
     );
 
-    // High-performance version.
-    // Does not copy Position.
     void generateLegalMoves(
         Position& pos,
         MoveList& legal
@@ -203,6 +212,11 @@ namespace chess {
     bool inCheck(
         const Position& pos,
         bool whiteKing
+    );
+
+    // Draw by insufficient mating material.
+    bool isInsufficientMaterial(
+        const Position& pos
     );
 
     std::uint64_t perft(

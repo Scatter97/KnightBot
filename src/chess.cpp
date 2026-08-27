@@ -1832,7 +1832,170 @@ namespace chess {
                 !whiteKing
             );
     }
+    // ============================================================
+// INSUFFICIENT MATERIAL
+// ============================================================
 
+    bool isInsufficientMaterial(
+        const Position& pos
+    ) {
+        int whiteKnights = 0;
+        int blackKnights = 0;
+
+        int whiteBishops = 0;
+        int blackBishops = 0;
+
+        int whiteBishopSquare = -1;
+        int blackBishopSquare = -1;
+
+
+        for (
+            int square = 0;
+            square < 64;
+            ++square
+            ) {
+            const char piece =
+                pos.board[square];
+
+
+            switch (piece) {
+
+                // Any pawn, rook, or queen means this is not one
+                // of our insufficient-material cases.
+            case 'P':
+            case 'p':
+            case 'R':
+            case 'r':
+            case 'Q':
+            case 'q':
+                return false;
+
+
+            case 'N':
+                ++whiteKnights;
+                break;
+
+
+            case 'n':
+                ++blackKnights;
+                break;
+
+
+            case 'B':
+                ++whiteBishops;
+                whiteBishopSquare =
+                    square;
+                break;
+
+
+            case 'b':
+                ++blackBishops;
+                blackBishopSquare =
+                    square;
+                break;
+
+
+            default:
+                break;
+            }
+        }
+
+
+        const int totalKnights =
+            whiteKnights +
+            blackKnights;
+
+
+        const int totalBishops =
+            whiteBishops +
+            blackBishops;
+
+
+        const int totalMinorPieces =
+            totalKnights +
+            totalBishops;
+
+
+        // ========================================================
+        // K vs K
+        // ========================================================
+
+        if (
+            totalMinorPieces == 0
+            ) {
+            return true;
+        }
+
+
+        // ========================================================
+        // K+B vs K
+        // K+N vs K
+        // ========================================================
+
+        if (
+            totalMinorPieces == 1
+            ) {
+            return true;
+        }
+
+
+        // ========================================================
+        // K+B vs K+B
+        //
+        // If each side has exactly one bishop and both bishops
+        // live on the same colour complex, mate is impossible.
+        // ========================================================
+
+        if (
+            totalKnights == 0 &&
+            whiteBishops == 1 &&
+            blackBishops == 1
+            ) {
+            const int whiteFile =
+                whiteBishopSquare & 7;
+
+            const int whiteRank =
+                whiteBishopSquare >> 3;
+
+
+            const int blackFile =
+                blackBishopSquare & 7;
+
+            const int blackRank =
+                blackBishopSquare >> 3;
+
+
+            const bool whiteBishopDark =
+                (
+                    (
+                        whiteFile +
+                        whiteRank
+                        ) &
+                    1
+                    ) != 0;
+
+
+            const bool blackBishopDark =
+                (
+                    (
+                        blackFile +
+                        blackRank
+                        ) &
+                    1
+                    ) != 0;
+
+
+            if (
+                whiteBishopDark ==
+                blackBishopDark
+                ) {
+                return true;
+            }
+        }
+
+
+        return false;
+    }
 
     // ============================================================
     // MAKE MOVE
