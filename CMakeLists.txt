@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     KnightBot
-    VERSION 0.6.0
+    VERSION 0.7.0
     DESCRIPTION "KnightBot Chess Engine"
     LANGUAGES CXX
 )

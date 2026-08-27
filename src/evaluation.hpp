@@ -4,27 +4,24 @@
 
 namespace chess {
 
-	// Returns the basic value of a piece in centipawns.
+	// Absolute material value used by search heuristics such as SEE
+	// and move ordering.
 	//
-	// Pawn   = 100
-	// Knight = 320
-	// Bishop = 330
-	// Rook   = 500
-	// Queen  = 900
+	// These are centipawn-like values.
 	int pieceValue(char piece);
 
 
-	// Evaluates from White's perspective.
+	// Full static evaluation.
 	//
-	// Positive = White is better
-	// Negative = Black is better
+	// Positive = White better
+	// Negative = Black better
 	int evaluate(const Position& pos);
 
 
-	// Evaluates from the perspective of the side to move.
+	// Negamax-friendly evaluation.
 	//
-	// Positive = side to move is better
-	// Negative = side to move is worse
+	// Positive = side to move better
+	// Negative = side to move worse
 	int evaluateForSideToMove(const Position& pos);
 
 } // namespace chess
