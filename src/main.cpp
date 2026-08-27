@@ -419,6 +419,7 @@ namespace {
             "  moves\n"
             "  move <uci>\n"
             "  eval\n"
+            "  evaldetail\n"
             "  bestmove <depth>\n"
             "  think <milliseconds>\n"
             "  playbest <depth>\n"
@@ -709,7 +710,119 @@ namespace {
 
 } // anonymous namespace
 
+void printEvaluationBreakdown(
+    const chess::Position& pos
+) {
+    const chess::EvaluationBreakdown eval =
+        chess::evaluateDetailed(
+            pos
+        );
 
+    if (
+        eval.insufficientMaterial
+        ) {
+        std::cout
+            << "Insufficient material: draw\n"
+            << "Final evaluation: 0.00\n";
+
+        return;
+    }
+
+    auto printScore =
+        [](
+            const char* label,
+            int mg,
+            int eg
+            ) {
+                std::cout
+                    << std::left
+                    << std::setw(22)
+                    << label
+                    << "MG "
+                    << std::showpos
+                    << std::fixed
+                    << std::setprecision(2)
+                    << (mg / 100.0)
+                    << "   EG "
+                    << (eg / 100.0)
+                    << std::noshowpos
+                    << '\n';
+        };
+
+    std::cout
+        << "\nEvaluation breakdown\n"
+        << "------------------------------\n";
+
+    printScore(
+        "Material + PST:",
+        eval.materialAndPstMg,
+        eval.materialAndPstEg
+    );
+
+    printScore(
+        "Bishop pair:",
+        eval.bishopPairMg,
+        eval.bishopPairEg
+    );
+
+    printScore(
+        "Pawn structure:",
+        eval.pawnStructureMg,
+        eval.pawnStructureEg
+    );
+
+    printScore(
+        "Piece activity:",
+        eval.pieceActivityMg,
+        eval.pieceActivityEg
+    );
+
+    printScore(
+        "King safety:",
+        eval.kingSafetyMg,
+        eval.kingSafetyEg
+    );
+
+    printScore(
+        "Tempo:",
+        eval.tempoMg,
+        eval.tempoEg
+    );
+
+    std::cout
+        << "\nPhase: "
+        << eval.phase
+        << " / 24\n";
+
+    const double mgPercent =
+        (
+            static_cast<double>(
+                eval.phase
+                )
+            /
+            24.0
+            )
+        *
+        100.0;
+
+    std::cout
+        << "Blend: "
+        << std::fixed
+        << std::setprecision(1)
+        << mgPercent
+        << "% MG / "
+        << (100.0 - mgPercent)
+        << "% EG\n";
+
+    std::cout
+        << "Final evaluation: "
+        << std::showpos
+        << std::fixed
+        << std::setprecision(2)
+        << (eval.finalScore / 100.0)
+        << std::noshowpos
+        << '\n';
+}
 int main() {
 
     Position position =
@@ -1081,6 +1194,18 @@ int main() {
             std::cout <<
                 '\n';
         }
+        // ====================================================
+// DETAILED STATIC EVAL
+// ====================================================
+
+        else if (
+            command ==
+            "evaldetail"
+            ) {
+                printEvaluationBreakdown(
+                    position
+                );
+}
 
 
         // ====================================================
