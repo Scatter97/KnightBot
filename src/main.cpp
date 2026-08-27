@@ -11,6 +11,11 @@
 #include <string>
 #include <vector>
 
+// Fallback in case KnightBot is ever compiled without CMake.
+#ifndef KNIGHTBOT_VERSION
+#define KNIGHTBOT_VERSION "development"
+#endif
+
 namespace {
 
     using chess::Move;
@@ -36,8 +41,7 @@ namespace {
             moves
             ) {
             if (
-                chess::moveToUci(move)
-                ==
+                chess::moveToUci(move) ==
                 uci
                 ) {
                 chess::makeMove(
@@ -82,6 +86,7 @@ namespace {
                 searchScore
             );
 
+
         if (
             std::abs(score) >=
             chess::MATE_THRESHOLD
@@ -91,10 +96,9 @@ namespace {
                 std::abs(score);
 
             const int moves =
-                (
-                    plies + 1
-                    ) /
+                (plies + 1) /
                 2;
+
 
             if (
                 score > 0
@@ -265,9 +269,7 @@ namespace {
             result.seconds > 0.0
             ) {
             const auto nps =
-                static_cast<
-                std::uint64_t
-                >(
+                static_cast<std::uint64_t>(
                     result.nodes /
                     result.seconds
                     );
@@ -314,10 +316,7 @@ namespace {
                 std::abs(result.score);
 
             const int moves =
-                (
-                    plies + 1
-                    )
-                /
+                (plies + 1) /
                 2;
 
 
@@ -346,9 +345,7 @@ namespace {
             result.seconds > 0.0
             ) {
             const auto nps =
-                static_cast<
-                std::uint64_t
-                >(
+                static_cast<std::uint64_t>(
                     result.nodes /
                     result.seconds
                     );
@@ -361,9 +358,7 @@ namespace {
 
             std::cout <<
                 " time " <<
-                static_cast<
-                std::uint64_t
-                >(
+                static_cast<std::uint64_t>(
                     result.seconds *
                     1000.0
                     );
@@ -418,7 +413,6 @@ namespace {
     // ============================================================
 
     void printHelp() {
-
         std::cout <<
             "\nKnightBot CLI commands:\n"
             "  board\n"
@@ -716,7 +710,6 @@ namespace {
 } // anonymous namespace
 
 
-
 int main() {
 
     Position position =
@@ -727,9 +720,15 @@ int main() {
         false;
 
 
+    // ========================================================
+    // STARTUP BANNER
+    // ========================================================
+
     std::cout <<
         "=========================\n"
-        "     KnightBot v0.5.1\n"
+        "     KnightBot v" <<
+        KNIGHTBOT_VERSION <<
+        "\n"
         "=========================\n\n"
         "Incremental bitboard alpha-beta engine\n";
 
@@ -801,17 +800,22 @@ int main() {
         // ====================================================
 
         if (
-            command == "uci"
+            command ==
+            "uci"
             ) {
             uciMode =
                 true;
 
 
             std::cout <<
-                "id name KnightBot 0.5.1\n";
+                "id name KnightBot " <<
+                KNIGHTBOT_VERSION <<
+                '\n';
+
 
             std::cout <<
-                "id author KnightBot Project\n";
+                "id author Joshua Wang\n";
+
 
             std::cout <<
                 "uciok\n";
@@ -979,8 +983,7 @@ int main() {
                 if (
                     chess::moveToUci(
                         move
-                    )
-                    ==
+                    ) ==
                     uci
                     ) {
                     const std::string san =
@@ -1352,9 +1355,7 @@ int main() {
                 0.0
                 ) {
                 const auto nps =
-                    static_cast<
-                    std::uint64_t
-                    >(
+                    static_cast<std::uint64_t>(
                         nodes /
                         elapsed.count()
                         );
