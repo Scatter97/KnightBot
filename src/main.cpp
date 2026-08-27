@@ -2,6 +2,7 @@
 #include "evaluation.hpp"
 #include "search.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
 
 // Fallback in case KnightBot is ever compiled without CMake.
 #ifndef KNIGHTBOT_VERSION
@@ -299,7 +301,11 @@ namespace {
     // UCI OUTPUT
     // ============================================================
 
-    void printUciInfo(
+    // ============================================================
+// UCI SEARCH INFO
+// ============================================================
+
+    void printUciSearchInfo(
         const SearchResult& result
     ) {
         std::cout <<
@@ -307,13 +313,20 @@ namespace {
             result.depth;
 
 
+        // ========================================================
+        // SCORE
+        // ========================================================
+
         if (
             std::abs(result.score) >=
             chess::MATE_THRESHOLD
             ) {
             const int plies =
                 chess::MATE_SCORE -
-                std::abs(result.score);
+                std::abs(
+                    result.score
+                );
+
 
             const int moves =
                 (plies + 1) /
@@ -336,14 +349,29 @@ namespace {
         }
 
 
+        // ========================================================
+        // NODES
+        // ========================================================
+
         std::cout <<
             " nodes " <<
             result.nodes;
 
 
+        // ========================================================
+        // TIME + NPS
+        // ========================================================
+
         if (
             result.seconds > 0.0
             ) {
+            const auto milliseconds =
+                static_cast<std::uint64_t>(
+                    result.seconds *
+                    1000.0
+                    );
+
+
             const auto nps =
                 static_cast<std::uint64_t>(
                     result.nodes /
@@ -358,12 +386,13 @@ namespace {
 
             std::cout <<
                 " time " <<
-                static_cast<std::uint64_t>(
-                    result.seconds *
-                    1000.0
-                    );
+                milliseconds;
         }
 
+
+        // ========================================================
+        // PRINCIPAL VARIATION
+        // ========================================================
 
         if (
             !result.pv.empty()
@@ -389,6 +418,18 @@ namespace {
             '\n';
 
 
+        // Make sure GUIs receive the line immediately.
+        std::cout.flush();
+    }
+
+
+    // ============================================================
+    // UCI BEST MOVE
+    // ============================================================
+
+    void printUciBestMove(
+        const SearchResult& result
+    ) {
         if (
             result.hasMove
             ) {
@@ -405,6 +446,9 @@ namespace {
             std::cout <<
                 "bestmove 0000\n";
         }
+
+
+        std::cout.flush();
     }
 
 
@@ -611,11 +655,358 @@ namespace {
 
         return false;
     }
-
+    // ============================================================
+// UCI TIME MANAGEMENT
+// ============================================================
+//
+// Calculates how many milliseconds KnightBot should spend on
+// the current move.
+//
+// The goal is to:
+//
+// - avoid running out of time
+// - use more time when plenty remains
+// - take the increment into account
+// - respect "movestogo" when a GUI supplies it
+//
+// This is deliberately conservative for now. We can make the
+// time manager smarter later.
+//
+// ============================================================
 
     // ============================================================
-    // UCI GO
+// UCI TIME MANAGEMENT
+// ============================================================
+//
+// KnightBot time manager.
+//
+// Goals:
+//
+// - remain conservative in the opening
+// - spend more time in the middlegame
+// - use increment intelligently
+// - avoid dying on the clock
+// - preserve a safety reserve
+// - become increasingly careful in severe time pressure
+//
+// This returns the target number of milliseconds for the
+// current search.
+//
+// ============================================================
+
+    int calculateMoveTime(
+        const Position& position,
+        int whiteTime,
+        int blackTime,
+        int whiteIncrement,
+        int blackIncrement,
+        int movesToGo
+    ) {
+        const int remainingTime =
+            position.whiteToMove
+            ? whiteTime
+            : blackTime;
+
+
+        const int increment =
+            position.whiteToMove
+            ? whiteIncrement
+            : blackIncrement;
+
+
+        // No usable clock information.
+        if (
+            remainingTime < 0
+            ) {
+            return -1;
+        }
+
+
+        // ========================================================
+        // SAFETY RESERVE
+        // ========================================================
+        //
+        // Don't plan to consume the entire clock.
+        //
+        // Example:
+        //
+        // 10,000 ms -> ~833 ms reserve
+        //  4,000 ms -> ~333 ms reserve
+        //  1,000 ms -> ~83 ms reserve
+        //
+        // ========================================================
+
+        const int reserve =
+            std::clamp(
+                remainingTime / 12,
+                75,
+                1200
+            );
+
+
+        const int usableTime =
+            std::max(
+                1,
+                remainingTime -
+                reserve
+            );
+
+
+        // ========================================================
+        // ESTIMATED MOVES REMAINING
+        // ========================================================
+        //
+        // If the GUI explicitly supplies movestogo, use it.
+        //
+        // Otherwise estimate based on where we are in the game.
+        //
+        // Opening:
+        //     save some time
+        //
+        // Middlegame:
+        //     spend substantially more
+        //
+        // Late game:
+        //     fewer moves probably remain
+        //
+        // ========================================================
+
+        int expectedMoves;
+
+
+        if (
+            movesToGo > 0
+            ) {
+            expectedMoves =
+                std::clamp(
+                    movesToGo,
+                    1,
+                    60
+                );
+        }
+
+        else {
+            const int moveNumber =
+                position.fullmoveNumber;
+
+
+            if (
+                moveNumber <= 10
+                ) {
+                expectedMoves =
+                    24;
+            }
+
+            else if (
+                moveNumber <= 25
+                ) {
+                expectedMoves =
+                    14;
+            }
+
+            else if (
+                moveNumber <= 40
+                ) {
+                expectedMoves =
+                    12;
+            }
+
+            else {
+                expectedMoves =
+                    10;
+            }
+        }
+
+
+        // ========================================================
+        // BASIC TIME ALLOCATION
+        // ========================================================
+
+        int moveTime =
+            usableTime /
+            expectedMoves;
+
+
+        // ========================================================
+        // INCREMENT
+        // ========================================================
+        //
+        // Spend most, but not all, of the increment.
+        //
+        // At +0.1:
+        //
+        // 100 ms increment -> +80 ms
+        //
+        // ========================================================
+
+        if (
+            increment > 0
+            ) {
+            moveTime +=
+                (
+                    increment *
+                    4
+                    )
+                /
+                5;
+        }
+
+
+        // ========================================================
+        // GAME-STAGE MULTIPLIER
+        // ========================================================
+        //
+        // Opening:
+        //     85%
+        //
+        // Early/mid middlegame:
+        //     135%
+        //
+        // Later middlegame:
+        //     120%
+        //
+        // Endgame:
+        //     105%
+        //
+        // This is specifically intended to prevent KnightBot from
+        // saving several seconds unnecessarily through the middle
+        // of a 10+0.1 game.
+        //
+        // ========================================================
+
+        const int moveNumber =
+            position.fullmoveNumber;
+
+
+        if (
+            moveNumber <= 10
+            ) {
+            moveTime =
+                (
+                    moveTime *
+                    85
+                    )
+                /
+                100;
+        }
+
+        else if (
+            moveNumber <= 25
+            ) {
+            moveTime =
+                (
+                    moveTime *
+                    135
+                    )
+                /
+                100;
+        }
+
+        else if (
+            moveNumber <= 40
+            ) {
+            moveTime =
+                (
+                    moveTime *
+                    120
+                    )
+                /
+                100;
+        }
+
+        else {
+            moveTime =
+                (
+                    moveTime *
+                    105
+                    )
+                /
+                100;
+        }
+
+
+        // ========================================================
+        // HARD MAXIMUM
+        // ========================================================
+        //
+        // Never intentionally spend more than about one third of
+        // our usable clock on a normal move.
+        //
+        // ========================================================
+
+        int maximumMoveTime =
+            std::max(
+                1,
+                usableTime /
+                3
+            );
+
+
+        // ========================================================
+        // LOW-TIME EMERGENCY MODE
+        // ========================================================
+
+        if (
+            remainingTime <= 1000
+            ) {
+            maximumMoveTime =
+                std::min(
+                    maximumMoveTime,
+                    std::max(
+                        1,
+                        remainingTime /
+                        6
+                    )
+                );
+        }
+
+
+        if (
+            remainingTime <= 400
+            ) {
+            maximumMoveTime =
+                std::min(
+                    maximumMoveTime,
+                    std::max(
+                        1,
+                        remainingTime /
+                        10
+                    )
+                );
+        }
+
+
+        if (
+            remainingTime <= 150
+            ) {
+            maximumMoveTime =
+                std::min(
+                    maximumMoveTime,
+                    std::max(
+                        1,
+                        remainingTime /
+                        15
+                    )
+                );
+        }
+
+
+        moveTime =
+            std::min(
+                moveTime,
+                maximumMoveTime
+            );
+
+
+        return
+            std::max(
+                1,
+                moveTime
+            );
+    }
     // ============================================================
+// UCI GO
+// ============================================================
 
     bool handleUciGo(
         const std::string& line,
@@ -628,10 +1019,8 @@ namespace {
         std::string command;
         std::string token;
 
-
         input >>
             command;
-
 
         if (
             command !=
@@ -641,12 +1030,38 @@ namespace {
         }
 
 
+        // ========================================================
+        // UCI SEARCH PARAMETERS
+        // ========================================================
+
         int depth =
             -1;
 
         int movetime =
             -1;
 
+        int whiteTime =
+            -1;
+
+        int blackTime =
+            -1;
+
+        int whiteIncrement =
+            0;
+
+        int blackIncrement =
+            0;
+
+        int movesToGo =
+            -1;
+
+        bool infinite =
+            false;
+
+
+        // ========================================================
+        // PARSE GO COMMAND
+        // ========================================================
 
         while (
             input >>
@@ -667,11 +1082,77 @@ namespace {
                 input >>
                     movetime;
             }
+
+            else if (
+                token ==
+                "wtime"
+                ) {
+                input >>
+                    whiteTime;
+            }
+
+            else if (
+                token ==
+                "btime"
+                ) {
+                input >>
+                    blackTime;
+            }
+
+            else if (
+                token ==
+                "winc"
+                ) {
+                input >>
+                    whiteIncrement;
+            }
+
+            else if (
+                token ==
+                "binc"
+                ) {
+                input >>
+                    blackIncrement;
+            }
+
+            else if (
+                token ==
+                "movestogo"
+                ) {
+                input >>
+                    movesToGo;
+            }
+
+            else if (
+                token ==
+                "infinite"
+                ) {
+                infinite =
+                    true;
+            }
         }
+
+
+        // ========================================================
+        // LIVE ITERATIVE-DEEPENING INFO
+        // ========================================================
+
+        const chess::SearchInfoCallback infoCallback =
+            [](
+                const SearchResult& info
+                ) {
+                    printUciSearchInfo(
+                        info
+                    );
+            };
 
 
         SearchResult result;
 
+
+        // ========================================================
+        // EXPLICIT MOVETIME
+        // ========================================================
 
         if (
             movetime > 0
@@ -679,35 +1160,115 @@ namespace {
             result =
                 chess::searchBestMoveTimed(
                     position,
-                    movetime
+                    movetime,
+                    infoCallback
                 );
         }
 
-        else {
+
+        // ========================================================
+        // NORMAL TOURNAMENT CLOCK
+        // ========================================================
+
+        else if (
+            whiteTime >= 0 ||
+            blackTime >= 0
+            ) {
+            const int allocatedTime =
+                calculateMoveTime(
+                    position,
+                    whiteTime,
+                    blackTime,
+                    whiteIncrement,
+                    blackIncrement,
+                    movesToGo
+                );
+
+
             if (
-                depth < 1
+                allocatedTime > 0
                 ) {
-                depth =
-                    5;
+                result =
+                    chess::searchBestMoveTimed(
+                        position,
+                        allocatedTime,
+                        infoCallback
+                    );
             }
 
+            else {
+                result =
+                    chess::searchBestMove(
+                        position,
+                        5,
+                        infoCallback
+                    );
+            }
+        }
 
+
+        // ========================================================
+        // FIXED DEPTH
+        // ========================================================
+
+        else if (
+            depth > 0
+            ) {
             result =
                 chess::searchBestMove(
                     position,
-                    depth
+                    depth,
+                    infoCallback
                 );
         }
 
 
-        printUciInfo(
+        // ========================================================
+        // TEMPORARY INFINITE SUPPORT
+        // ========================================================
+        //
+        // KnightBot does not yet have true asynchronous
+        // "go infinite" + "stop" support.
+        //
+        // ========================================================
+
+        else if (
+            infinite
+            ) {
+            result =
+                chess::searchBestMoveTimed(
+                    position,
+                    1000,
+                    infoCallback
+                );
+        }
+
+
+        // ========================================================
+        // FALLBACK
+        // ========================================================
+
+        else {
+            result =
+                chess::searchBestMove(
+                    position,
+                    5,
+                    infoCallback
+                );
+        }
+
+
+        // ========================================================
+        // FINAL UCI MOVE
+        // ========================================================
+
+        printUciBestMove(
             result
         );
 
 
         return true;
     }
-
 } // anonymous namespace
 
 void printEvaluationBreakdown(

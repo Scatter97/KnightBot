@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace chess {
@@ -13,6 +14,11 @@ namespace chess {
 
     constexpr int MATE_THRESHOLD =
         29000;
+
+
+    // ============================================================
+    // SEARCH RESULT
+    // ============================================================
 
     struct SearchResult {
 
@@ -33,18 +39,60 @@ namespace chess {
         std::vector<Move> pv;
     };
 
+
+    // ============================================================
+    // SEARCH PROGRESS CALLBACK
+    // ============================================================
+    //
+    // Called after every fully completed iterative-deepening depth.
+    //
+    // Example:
+    //
+    // depth 1
+    // depth 2
+    // depth 3
+    // ...
+    //
+    // UCI mode uses this to print live "info depth ..." lines.
+    //
+    // ============================================================
+
+    using SearchInfoCallback =
+        std::function<
+        void(
+            const SearchResult&
+            )
+        >;
+
+
+    // ============================================================
+    // TRANSPOSITION TABLE
+    // ============================================================
+
     void clearTranspositionTable();
 
     std::size_t transpositionTableSize();
 
+
+    // ============================================================
+    // FIXED DEPTH SEARCH
+    // ============================================================
+
     SearchResult searchBestMove(
         const Position& pos,
-        int maxDepth
+        int maxDepth,
+        const SearchInfoCallback& infoCallback = {}
     );
+
+
+    // ============================================================
+    // TIMED SEARCH
+    // ============================================================
 
     SearchResult searchBestMoveTimed(
         const Position& pos,
-        int milliseconds
+        int milliseconds,
+        const SearchInfoCallback& infoCallback = {}
     );
 
 } // namespace chess

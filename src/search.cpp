@@ -3260,7 +3260,8 @@ namespace chess {
             const Position& rootPosition,
             int maxDepth,
             bool useDeadline,
-            std::chrono::steady_clock::time_point deadline
+            std::chrono::steady_clock::time_point deadline,
+            const SearchInfoCallback& infoCallback
         ) {
             const auto start =
                 std::chrono::steady_clock::now();
@@ -3532,6 +3533,29 @@ namespace chess {
                     depth;
 
 
+                // ====================================================
+                // ELAPSED TIME FOR THIS ITERATION
+                // ====================================================
+
+                const auto iterationEnd =
+                    std::chrono::steady_clock::now();
+
+
+                current.seconds =
+                    std::chrono::duration<double>(
+                        iterationEnd -
+                        start
+                    ).count();
+
+
+                current.stopped =
+                    false;
+
+
+                // ====================================================
+                // COMPLETED ITERATION
+                // ====================================================
+
                 bestCompleted =
                     current;
 
@@ -3539,6 +3563,31 @@ namespace chess {
                 previousScore =
                     current.score;
 
+
+                // ====================================================
+                // SEARCH PROGRESS CALLBACK
+                // ====================================================
+                //
+                // Only report FULLY COMPLETED depths.
+                //
+                // If depth 8 gets interrupted by the clock, for example,
+                // depth 8 is not reported. Depth 7 remains the last valid
+                // completed result.
+                //
+                // ====================================================
+
+                if (
+                    infoCallback
+                    ) {
+                    infoCallback(
+                        current
+                    );
+                }
+
+
+                // ====================================================
+                // MATE FOUND
+                // ====================================================
 
                 if (
                     std::abs(
@@ -3549,7 +3598,7 @@ namespace chess {
                     ) {
                     break;
                 }
-            }
+                } // end iterative-deepening depth loop
 
 
             const auto end =
@@ -3616,7 +3665,8 @@ namespace chess {
 
     SearchResult searchBestMove(
         const Position& pos,
-        int maxDepth
+        int maxDepth,
+        const SearchInfoCallback& infoCallback
     ) {
         if (
             maxDepth < 1
@@ -3631,14 +3681,16 @@ namespace chess {
                 pos,
                 maxDepth,
                 false,
-                {}
+                {},
+                infoCallback
             );
     }
 
 
     SearchResult searchBestMoveTimed(
         const Position& pos,
-        int milliseconds
+        int milliseconds,
+        const SearchInfoCallback& infoCallback
     ) {
         if (
             milliseconds < 1
@@ -3661,7 +3713,8 @@ namespace chess {
                 pos,
                 64,
                 true,
-                deadline
+                deadline,
+                infoCallback
             );
     }
 
