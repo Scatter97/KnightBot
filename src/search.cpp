@@ -19,9 +19,11 @@ namespace chess {
         constexpr int MAX_QPLY = 8;
         constexpr int DELTA_MARGIN = 150;
 
-        // Start aspiration searches at ±0.25 pawns.
         constexpr int ASPIRATION_INITIAL_WINDOW = 25;
         constexpr int ASPIRATION_MIN_DEPTH = 4;
+
+        constexpr int NULL_MOVE_MIN_DEPTH = 3;
+        constexpr int NULL_MOVE_BASE_REDUCTION = 2;
 
 
         // ============================================================
@@ -39,7 +41,6 @@ namespace chess {
 
         struct TTEntry {
             std::uint64_t key = 0;
-
             int score = 0;
             int depth = -1;
 
@@ -51,7 +52,6 @@ namespace chess {
         };
 
         std::array<TTEntry, TT_SIZE> transpositionTable{};
-
         std::size_t ttUsed = 0;
 
 
@@ -246,8 +246,7 @@ namespace chess {
                     : 'P';
             }
 
-            return
-                pos.board[move.to];
+            return pos.board[move.to];
         }
 
 
@@ -332,7 +331,6 @@ namespace chess {
                     );
 
 
-            // Pawn
             if (type == 'p') {
                 if (
                     isWhitePiece(piece)
@@ -348,7 +346,6 @@ namespace chess {
             }
 
 
-            // Knight
             if (type == 'n') {
                 return
                     (
@@ -363,7 +360,6 @@ namespace chess {
             }
 
 
-            // King
             if (type == 'k') {
                 return
                     std::abs(df) <= 1 &&
@@ -379,7 +375,6 @@ namespace chess {
             int stepRank = 0;
 
 
-            // Bishop / Queen
             if (
                 type == 'b' ||
                 type == 'q'
@@ -403,7 +398,6 @@ namespace chess {
             }
 
 
-            // Rook / Queen
             if (
                 stepFile == 0 &&
                 stepRank == 0 &&
@@ -480,7 +474,6 @@ namespace chess {
                 file += stepFile;
                 rank += stepRank;
             }
-
 
             return false;
         }
@@ -665,7 +658,6 @@ namespace chess {
                     promotedAttacker;
 
 
-                // Pinned attacker / illegal king capture.
                 if (
                     !seeKingSafe(
                         board,
@@ -784,7 +776,6 @@ namespace chess {
                 board[move.to];
 
 
-            // En passant.
             if (
                 move.enPassant
                 ) {
@@ -824,7 +815,6 @@ namespace chess {
                 movingPiece;
 
 
-            // Promotion.
             if (
                 move.promotion
                 ) {
@@ -1187,6 +1177,112 @@ namespace chess {
 
 
         // ============================================================
+        // NULL MOVE
+        // ============================================================
+
+        struct NullMoveUndo {
+            bool whiteToMove = true;
+
+            int enPassantSquare = -1;
+
+            int halfmoveClock = 0;
+            int fullmoveNumber = 1;
+
+            std::uint64_t zobristKey = 0;
+        };
+
+
+        bool hasNonPawnMaterial(
+            const Position& pos,
+            bool white
+        ) {
+            if (
+                white
+                ) {
+                return
+                    pos.pieces[WN] != 0 ||
+                    pos.pieces[WB] != 0 ||
+                    pos.pieces[WR] != 0 ||
+                    pos.pieces[WQ] != 0;
+            }
+
+            return
+                pos.pieces[BN] != 0 ||
+                pos.pieces[BB] != 0 ||
+                pos.pieces[BR] != 0 ||
+                pos.pieces[BQ] != 0;
+        }
+
+
+        void makeNullMove(
+            Position& pos,
+            NullMoveUndo& undo
+        ) {
+            undo.whiteToMove =
+                pos.whiteToMove;
+
+            undo.enPassantSquare =
+                pos.enPassantSquare;
+
+            undo.halfmoveClock =
+                pos.halfmoveClock;
+
+            undo.fullmoveNumber =
+                pos.fullmoveNumber;
+
+            undo.zobristKey =
+                pos.zobristKey;
+
+
+            const bool wasWhite =
+                pos.whiteToMove;
+
+
+            pos.whiteToMove =
+                !pos.whiteToMove;
+
+            pos.enPassantSquare =
+                -1;
+
+            ++pos.halfmoveClock;
+
+
+            if (
+                !wasWhite
+                ) {
+                ++pos.fullmoveNumber;
+            }
+
+
+            pos.zobristKey =
+                calculateZobrist(
+                    pos
+                );
+        }
+
+
+        void undoNullMove(
+            Position& pos,
+            const NullMoveUndo& undo
+        ) {
+            pos.whiteToMove =
+                undo.whiteToMove;
+
+            pos.enPassantSquare =
+                undo.enPassantSquare;
+
+            pos.halfmoveClock =
+                undo.halfmoveClock;
+
+            pos.fullmoveNumber =
+                undo.fullmoveNumber;
+
+            pos.zobristKey =
+                undo.zobristKey;
+        }
+
+
+        // ============================================================
         // QUIESCENCE
         // ============================================================
 
@@ -1251,7 +1347,6 @@ namespace chess {
             }
 
 
-            // If checked, all legal evasions must be searched.
             if (
                 checked
                 ) {
@@ -1268,6 +1363,7 @@ namespace chess {
                     moves
                     ) {
                     UndoState undo;
+
 
                     makeMove(
                         pos,
@@ -1362,7 +1458,6 @@ namespace chess {
                 }
 
 
-                // Delta pruning.
                 if (
                     capture &&
                     !move.promotion
@@ -1388,7 +1483,6 @@ namespace chess {
                 }
 
 
-                // SEE pruning.
                 const int see =
                     staticExchangeEvaluation(
                         pos,
@@ -1477,7 +1571,7 @@ namespace chess {
 
 
         // ============================================================
-        // NEGAMAX + PVS
+        // NEGAMAX + PVS + NULL MOVE
         // ============================================================
 
         int negamax(
@@ -1486,7 +1580,8 @@ namespace chess {
             int alpha,
             int beta,
             int ply,
-            SearchContext& context
+            SearchContext& context,
+            bool allowNull
         ) {
             if (
                 ply >=
@@ -1548,7 +1643,7 @@ namespace chess {
 
 
             // ========================================================
-            // TT PROBE
+            // TT
             // ========================================================
 
             if (
@@ -1562,8 +1657,7 @@ namespace chess {
                     ttMove =
                         ttEntry->bestMove;
 
-                    hasTTMove =
-                        true;
+                    hasTTMove = true;
                 }
 
 
@@ -1614,10 +1708,104 @@ namespace chess {
 
 
             // ========================================================
-            // MOVE GENERATION
+            // CHECK STATUS
+            // ========================================================
+
+            const bool checked =
+                inCheck(
+                    pos,
+                    pos.whiteToMove
+                );
+
+
+            // ========================================================
+            // NULL-MOVE PRUNING
+            // ========================================================
+
+            if (
+                allowNull &&
+                !checked &&
+                depth >=
+                NULL_MOVE_MIN_DEPTH &&
+                hasNonPawnMaterial(
+                    pos,
+                    pos.whiteToMove
+                ) &&
+                beta <
+                MATE_THRESHOLD
+                ) {
+                NullMoveUndo nullUndo;
+
+
+                makeNullMove(
+                    pos,
+                    nullUndo
+                );
+
+
+                const int reduction =
+                    NULL_MOVE_BASE_REDUCTION
+                    +
+                    depth / 6;
+
+
+                const int nullDepth =
+                    std::max(
+                        0,
+                        depth -
+                        1 -
+                        reduction
+                    );
+
+
+                const int nullScore =
+                    -negamax(
+                        pos,
+                        nullDepth,
+                        -beta,
+                        -beta + 1,
+                        ply + 1,
+                        context,
+                        false
+                    );
+
+
+                undoNullMove(
+                    pos,
+                    nullUndo
+                );
+
+
+                if (
+                    context.stopped
+                    ) {
+                    return 0;
+                }
+
+
+                if (
+                    nullScore >= beta
+                    ) {
+                    if (
+                        nullScore >=
+                        MATE_THRESHOLD
+                        ) {
+                        return beta;
+                    }
+
+
+                    return
+                        nullScore;
+                }
+            }
+
+
+            // ========================================================
+            // LEGAL MOVES
             // ========================================================
 
             MoveList moves;
+
 
             generateLegalMoves(
                 pos,
@@ -1629,15 +1817,13 @@ namespace chess {
                 moves.empty()
                 ) {
                 if (
-                    inCheck(
-                        pos,
-                        pos.whiteToMove
-                    )
+                    checked
                     ) {
                     return
                         -MATE_SCORE +
                         ply;
                 }
+
 
                 return 0;
             }
@@ -1655,6 +1841,7 @@ namespace chess {
 
             int bestScore =
                 -INF;
+
 
             Move bestMove =
                 moves.front();
@@ -1685,7 +1872,6 @@ namespace chess {
                 int score = 0;
 
 
-                // First move gets full window.
                 if (
                     firstMove
                     ) {
@@ -1696,14 +1882,14 @@ namespace chess {
                             -beta,
                             -alpha,
                             ply + 1,
-                            context
+                            context,
+                            true
                         );
 
-                    firstMove =
-                        false;
+
+                    firstMove = false;
                 }
 
-                // Later moves get scout window first.
                 else {
                     score =
                         -negamax(
@@ -1712,7 +1898,8 @@ namespace chess {
                             -alpha - 1,
                             -alpha,
                             ply + 1,
-                            context
+                            context,
+                            true
                         );
 
 
@@ -1727,7 +1914,8 @@ namespace chess {
                                 -beta,
                                 -alpha,
                                 ply + 1,
-                                context
+                                context,
+                                true
                             );
                     }
                 }
@@ -1777,6 +1965,7 @@ namespace chess {
                         ply,
                         depth
                     );
+
 
                     break;
                 }
@@ -1870,6 +2059,7 @@ namespace chess {
 
                 MoveList legal;
 
+
                 generateLegalMoves(
                     pos,
                     legal
@@ -1890,12 +2080,15 @@ namespace chess {
                         )
                         ) {
                         found = true;
+
                         break;
                     }
                 }
 
 
-                if (!found) {
+                if (
+                    !found
+                    ) {
                     break;
                 }
 
@@ -1919,11 +2112,6 @@ namespace chess {
         // ============================================================
         // ROOT SEARCH
         // ============================================================
-        //
-        // Unlike the old version, alpha and beta are now parameters.
-        // This is what allows iterative deepening to use aspiration
-        // windows.
-        // ============================================================
 
         SearchResult searchRoot(
             Position& pos,
@@ -1933,6 +2121,7 @@ namespace chess {
             SearchContext& context
         ) {
             SearchResult result;
+
 
             result.depth =
                 depth;
@@ -1947,6 +2136,7 @@ namespace chess {
 
             MoveList moves;
 
+
             generateLegalMoves(
                 pos,
                 moves
@@ -1959,6 +2149,7 @@ namespace chess {
                 result.hasMove =
                     false;
 
+
                 result.score =
                     inCheck(
                         pos,
@@ -1966,6 +2157,7 @@ namespace chess {
                     )
                     ? -MATE_SCORE
                     : 0;
+
 
                 return result;
             }
@@ -2016,6 +2208,7 @@ namespace chess {
             int bestScore =
                 -INF;
 
+
             Move bestMove =
                 moves.front();
 
@@ -2023,10 +2216,6 @@ namespace chess {
             bool firstMove =
                 true;
 
-
-            // ========================================================
-            // ROOT PVS
-            // ========================================================
 
             for (
                 const Move& move :
@@ -2055,8 +2244,10 @@ namespace chess {
                             -beta,
                             -alpha,
                             1,
-                            context
+                            context,
+                            true
                         );
+
 
                     firstMove =
                         false;
@@ -2070,7 +2261,8 @@ namespace chess {
                             -alpha - 1,
                             -alpha,
                             1,
-                            context
+                            context,
+                            true
                         );
 
 
@@ -2085,7 +2277,8 @@ namespace chess {
                                 -beta,
                                 -alpha,
                                 1,
-                                context
+                                context,
+                                true
                             );
                     }
                 }
@@ -2126,7 +2319,6 @@ namespace chess {
                 }
 
 
-                // Important now that root has a finite aspiration beta.
                 if (
                     alpha >= beta
                     ) {
@@ -2211,6 +2403,7 @@ namespace chess {
 
             SearchContext context;
 
+
             context.useDeadline =
                 useDeadline;
 
@@ -2223,6 +2416,7 @@ namespace chess {
 
             MoveList rootMoves;
 
+
             generateLegalMoves(
                 pos,
                 rootMoves
@@ -2234,6 +2428,7 @@ namespace chess {
                 ) {
                 bestCompleted.hasMove =
                     false;
+
 
                 bestCompleted.score =
                     inCheck(
@@ -2261,6 +2456,7 @@ namespace chess {
             bestCompleted.hasMove =
                 true;
 
+
             bestCompleted.bestMove =
                 rootMoves.front();
 
@@ -2268,10 +2464,6 @@ namespace chess {
             int previousScore =
                 0;
 
-
-            // ========================================================
-            // ITERATIVE DEEPENING
-            // ========================================================
 
             for (
                 int depth = 1;
@@ -2292,10 +2484,7 @@ namespace chess {
 
 
                 // ====================================================
-                // SHALLOW DEPTHS
-                //
-                // Use the full window while the previous score is not
-                // yet very reliable.
+                // FULL WINDOW AT SHALLOW DEPTH
                 // ====================================================
 
                 if (
@@ -2313,7 +2502,7 @@ namespace chess {
                 }
 
                 // ====================================================
-                // ASPIRATION WINDOW
+                // ASPIRATION WINDOWS
                 // ====================================================
 
                 else {
@@ -2337,8 +2526,9 @@ namespace chess {
                         );
 
 
-                    while (true) {
-
+                    while (
+                        true
+                        ) {
                         current =
                             searchRoot(
                                 pos,
@@ -2356,18 +2546,13 @@ namespace chess {
                         }
 
 
-                        // --------------------------------------------
-                        // FAIL LOW
-                        //
-                        // Actual score was lower than expected.
-                        // Widen downward.
-                        // --------------------------------------------
-
+                        // Fail low.
                         if (
                             current.score <=
                             alpha
                             ) {
-                            window *= 2;
+                            window *=
+                                2;
 
 
                             if (
@@ -2402,18 +2587,13 @@ namespace chess {
                         }
 
 
-                        // --------------------------------------------
-                        // FAIL HIGH
-                        //
-                        // Actual score was higher than expected.
-                        // Widen upward.
-                        // --------------------------------------------
-
+                        // Fail high.
                         if (
                             current.score >=
                             beta
                             ) {
-                            window *= 2;
+                            window *=
+                                2;
 
 
                             if (
@@ -2448,7 +2628,6 @@ namespace chess {
                         }
 
 
-                        // Score landed inside the window.
                         break;
                     }
                 }
@@ -2517,7 +2696,6 @@ namespace chess {
     // ============================================================
 
     void clearTranspositionTable() {
-
         for (
             TTEntry& entry :
             transpositionTable
@@ -2527,16 +2705,20 @@ namespace chess {
         }
 
 
-        ttUsed = 0;
+        ttUsed =
+            0;
 
-        killerMoves = {};
 
-        historyTable = {};
+        killerMoves =
+        {};
+
+
+        historyTable =
+        {};
     }
 
 
     std::size_t transpositionTableSize() {
-
         return
             ttUsed;
     }
@@ -2549,7 +2731,8 @@ namespace chess {
         if (
             maxDepth < 1
             ) {
-            maxDepth = 1;
+            maxDepth =
+                1;
         }
 
 
@@ -2570,7 +2753,8 @@ namespace chess {
         if (
             milliseconds < 1
             ) {
-            milliseconds = 1;
+            milliseconds =
+                1;
         }
 
 
