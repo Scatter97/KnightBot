@@ -76,6 +76,20 @@ namespace chess {
 
 
     // ============================================================
+    // ACTIVE EVALUATOR
+    // ============================================================
+    //
+    // Uses NNUE when it is enabled and a valid network is loaded.
+    // Otherwise falls back to the handcrafted evaluator.
+    // Positive = White better.
+    // ============================================================
+
+    int evaluateActive(
+        const Position& pos
+    );
+
+
+    // ============================================================
     // DETAILED STATIC EVALUATION
     // ============================================================
     //

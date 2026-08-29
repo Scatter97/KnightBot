@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     KnightBot
-    VERSION 0.7.0
+    VERSION 0.10.0
     DESCRIPTION "KnightBot Chess Engine"
     LANGUAGES CXX
 )
@@ -14,6 +14,8 @@ project(
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(Threads REQUIRED)
 
 
 # ============================================================
@@ -27,6 +29,10 @@ add_executable(
     src/chess.cpp
     src/evaluation.cpp
     src/search.cpp
+
+    src/nnue.cpp
+    src/training.cpp
+    src/devtools.cpp
 )
 
 
@@ -38,6 +44,12 @@ target_include_directories(
     KnightBot
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(
+    KnightBot
+    PRIVATE
+        Threads::Threads
 )
 
 
@@ -91,6 +103,7 @@ if(MSVC)
         KnightBot
         PRIVATE
             $<$<CONFIG:Release>:/O2>
+            $<$<CONFIG:Release>:/arch:AVX2>
     )
 
 else()

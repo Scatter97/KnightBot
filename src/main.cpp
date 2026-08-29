@@ -1,16 +1,33 @@
 #include "chess.hpp"
+#include "devtools.hpp"
 #include "evaluation.hpp"
+#include "nnue.hpp"
 #include "search.hpp"
+#include "training.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 
 // Fallback in case KnightBot is ever compiled without CMake.
@@ -23,6 +40,125 @@ namespace {
     using chess::Move;
     using chess::Position;
     using chess::SearchResult;
+
+    std::mutex uciOutputMutex;
+    std::thread uciSearchThread;
+
+    void stopAndJoinUciSearch() {
+        if (uciSearchThread.joinable()) {
+            chess::requestSearchStop();
+            uciSearchThread.join();
+        }
+
+        chess::resetSearchStop();
+    }
+
+
+    std::string trimCopy(
+        std::string text
+    ) {
+        while (!text.empty() &&
+               std::isspace(static_cast<unsigned char>(text.front()))) {
+            text.erase(text.begin());
+        }
+
+        while (!text.empty() &&
+               std::isspace(static_cast<unsigned char>(text.back()))) {
+            text.pop_back();
+        }
+
+        return text;
+    }
+
+
+    std::string lowerCopy(
+        std::string text
+    ) {
+        std::transform(
+            text.begin(),
+            text.end(),
+            text.begin(),
+            [](unsigned char character) {
+                return static_cast<char>(std::tolower(character));
+            }
+        );
+
+        return text;
+    }
+
+
+    bool handleUciSetOption(
+        const std::string& line
+    ) {
+        constexpr const char* prefix = "setoption name ";
+
+        if (line.rfind(prefix, 0) != 0) {
+            return false;
+        }
+
+        std::string remainder =
+            line.substr(std::char_traits<char>::length(prefix));
+        std::string name;
+        std::string value;
+
+        const std::size_t valuePosition = remainder.find(" value ");
+
+        if (valuePosition == std::string::npos) {
+            name = trimCopy(remainder);
+        }
+        else {
+            name = trimCopy(remainder.substr(0, valuePosition));
+            value = trimCopy(remainder.substr(valuePosition + 7));
+        }
+
+        if (name == "UseNNUE") {
+            const std::string lowered = lowerCopy(value);
+            const bool enabled =
+                lowered == "true" || lowered == "1" ||
+                lowered == "on" || lowered == "yes";
+
+            chess::setNNUEEnabled(enabled);
+            chess::clearTranspositionTable();
+
+            std::cout << "info string UseNNUE "
+                      << (enabled ? "true" : "false");
+
+            if (enabled && !chess::nnueLoaded()) {
+                std::cout << " - no network loaded; using handcrafted fallback";
+            }
+
+            std::cout << '\n' << std::flush;
+            return true;
+        }
+
+        if (name == "EvalFile") {
+            if (value.empty() || value == "<empty>") {
+                chess::unloadNNUE();
+                chess::clearTranspositionTable();
+                std::cout << "info string NNUE network unloaded\n"
+                          << std::flush;
+                return true;
+            }
+
+            std::string error;
+
+            if (chess::loadNNUE(value, &error)) {
+                chess::clearTranspositionTable();
+                std::cout << "info string NNUE loaded: " << value << '\n'
+                          << std::flush;
+            }
+            else {
+                std::cout << "info string NNUE load failed: " << error << '\n'
+                          << std::flush;
+            }
+
+            return true;
+        }
+
+        std::cout << "info string Unknown option: " << name << '\n'
+                  << std::flush;
+        return true;
+    }
 
 
     // ============================================================
@@ -308,6 +444,7 @@ namespace {
     void printUciSearchInfo(
         const SearchResult& result
     ) {
+        const std::lock_guard<std::mutex> lock(uciOutputMutex);
         std::cout <<
             "info depth " <<
             result.depth;
@@ -430,6 +567,7 @@ namespace {
     void printUciBestMove(
         const SearchResult& result
     ) {
+        const std::lock_guard<std::mutex> lock(uciOutputMutex);
         if (
             result.hasMove
             ) {
@@ -464,6 +602,15 @@ namespace {
             "  move <uci>\n"
             "  eval\n"
             "  evaldetail\n"
+            "  evalcompare\n"
+            "  nnue on|off\n"
+            "  nnueload <file>\n"
+            "  nnueinfo\n"
+            "  nnuegentest <file>\n"
+            "  exportpos <file> [target_cp]\n"
+            "  selftest\n"
+            "  bench\n"
+            "  benchfull\n"
             "  bestmove <depth>\n"
             "  think <milliseconds>\n"
             "  playbest <depth>\n"
@@ -485,6 +632,8 @@ namespace {
             "  position startpos\n"
             "  position startpos moves e2e4 e7e5\n"
             "  position fen <FEN>\n"
+            "  setoption name UseNNUE value true|false\n"
+            "  setoption name EvalFile value <path>\n"
             "  go depth <n>\n"
             "  go movetime <ms>\n\n";
     }
@@ -496,7 +645,8 @@ namespace {
 
     bool handleUciPosition(
         const std::string& line,
-        Position& position
+        Position& position,
+        chess::SearchHistory& history
     ) {
         std::istringstream input(
             line
@@ -533,6 +683,8 @@ namespace {
             position =
                 chess::startPosition();
 
+            history = {position.zobristKey};
+
 
             if (
                 input >>
@@ -554,6 +706,8 @@ namespace {
                             ) {
                             return false;
                         }
+
+                        history.push_back(position.zobristKey);
                     }
                 }
             }
@@ -617,6 +771,8 @@ namespace {
                     chess::fromFEN(
                         fen
                     );
+
+                history = {position.zobristKey};
             }
 
             catch (...) {
@@ -644,6 +800,8 @@ namespace {
                             ) {
                             return false;
                         }
+
+                        history.push_back(position.zobristKey);
                     }
                 }
             }
@@ -1010,7 +1168,8 @@ namespace {
 
     bool handleUciGo(
         const std::string& line,
-        const Position& position
+        const Position& position,
+        const chess::SearchHistory& history
     ) {
         std::istringstream input(
             line
@@ -1058,6 +1217,24 @@ namespace {
         bool infinite =
             false;
 
+        auto readInteger = [&input](int& value) {
+            std::string text;
+            if (!(input >> text)) return false;
+            try {
+                std::size_t consumed = 0;
+                const long long parsed = std::stoll(text, &consumed);
+                if (consumed != text.size() || parsed < 0 ||
+                    parsed > std::numeric_limits<int>::max()) {
+                    return false;
+                }
+                value = static_cast<int>(parsed);
+                return true;
+            }
+            catch (...) {
+                return false;
+            }
+        };
+
 
         // ========================================================
         // PARSE GO COMMAND
@@ -1071,56 +1248,49 @@ namespace {
                 token ==
                 "depth"
                 ) {
-                input >>
-                    depth;
+                if (!readInteger(depth)) return false;
             }
 
             else if (
                 token ==
                 "movetime"
                 ) {
-                input >>
-                    movetime;
+                if (!readInteger(movetime)) return false;
             }
 
             else if (
                 token ==
                 "wtime"
                 ) {
-                input >>
-                    whiteTime;
+                if (!readInteger(whiteTime)) return false;
             }
 
             else if (
                 token ==
                 "btime"
                 ) {
-                input >>
-                    blackTime;
+                if (!readInteger(blackTime)) return false;
             }
 
             else if (
                 token ==
                 "winc"
                 ) {
-                input >>
-                    whiteIncrement;
+                if (!readInteger(whiteIncrement)) return false;
             }
 
             else if (
                 token ==
                 "binc"
                 ) {
-                input >>
-                    blackIncrement;
+                if (!readInteger(blackIncrement)) return false;
             }
 
             else if (
                 token ==
                 "movestogo"
                 ) {
-                input >>
-                    movesToGo;
+                if (!readInteger(movesToGo)) return false;
             }
 
             else if (
@@ -1146,7 +1316,15 @@ namespace {
                     );
             };
 
+        stopAndJoinUciSearch();
 
+        const Position searchPosition = position;
+        const chess::SearchHistory searchHistory = history;
+
+        chess::resetSearchStop();
+
+        uciSearchThread = std::thread(
+            [=]() mutable {
         SearchResult result;
 
 
@@ -1159,9 +1337,10 @@ namespace {
             ) {
             result =
                 chess::searchBestMoveTimed(
-                    position,
+                    searchPosition,
                     movetime,
-                    infoCallback
+                    infoCallback,
+                    searchHistory
                 );
         }
 
@@ -1176,7 +1355,7 @@ namespace {
             ) {
             const int allocatedTime =
                 calculateMoveTime(
-                    position,
+                    searchPosition,
                     whiteTime,
                     blackTime,
                     whiteIncrement,
@@ -1190,18 +1369,21 @@ namespace {
                 ) {
                 result =
                     chess::searchBestMoveTimed(
-                        position,
+                        searchPosition,
                         allocatedTime,
-                        infoCallback
+                        std::max(allocatedTime, allocatedTime * 2),
+                        infoCallback,
+                        searchHistory
                     );
             }
 
             else {
                 result =
                     chess::searchBestMove(
-                        position,
+                        searchPosition,
                         5,
-                        infoCallback
+                        infoCallback,
+                        searchHistory
                     );
             }
         }
@@ -1216,31 +1398,27 @@ namespace {
             ) {
             result =
                 chess::searchBestMove(
-                    position,
+                    searchPosition,
                     depth,
-                    infoCallback
+                    infoCallback,
+                    searchHistory
                 );
         }
 
 
         // ========================================================
-        // TEMPORARY INFINITE SUPPORT
-        // ========================================================
-        //
-        // KnightBot does not yet have true asynchronous
-        // "go infinite" + "stop" support.
-        //
+        // TRUE INFINITE SEARCH (terminated by the UCI stop command)
         // ========================================================
 
         else if (
             infinite
             ) {
-            result =
-                chess::searchBestMoveTimed(
-                    position,
-                    1000,
-                    infoCallback
-                );
+            result = chess::searchBestMove(
+                searchPosition,
+                127,
+                infoCallback,
+                searchHistory
+            );
         }
 
 
@@ -1251,9 +1429,10 @@ namespace {
         else {
             result =
                 chess::searchBestMove(
-                    position,
+                    searchPosition,
                     5,
-                    infoCallback
+                    infoCallback,
+                    searchHistory
                 );
         }
 
@@ -1264,6 +1443,9 @@ namespace {
 
         printUciBestMove(
             result
+        );
+
+            }
         );
 
 
@@ -1389,30 +1571,38 @@ int main() {
     Position position =
         chess::startPosition();
 
+    chess::SearchHistory gameHistory =
+        {position.zobristKey};
+
 
     bool uciMode =
         false;
+
+#ifdef _WIN32
+    const bool interactiveConsole =
+        _isatty(_fileno(stdin)) != 0;
+#else
+    const bool interactiveConsole =
+        isatty(fileno(stdin)) != 0;
+#endif
 
 
     // ========================================================
     // STARTUP BANNER
     // ========================================================
 
-    std::cout <<
-        "=========================\n"
-        "     KnightBot v" <<
-        KNIGHTBOT_VERSION <<
-        "\n"
-        "=========================\n\n"
-        "Incremental bitboard alpha-beta engine\n";
+    if (interactiveConsole) {
+        std::cout <<
+            "=========================\n"
+            "     KnightBot v" <<
+            KNIGHTBOT_VERSION <<
+            "\n"
+            "=========================\n\n"
+            "Incremental bitboard alpha-beta engine\n";
 
-
-    printHelp();
-
-
-    chess::printBoard(
-        position
-    );
+        printHelp();
+        chess::printBoard(position);
+    }
 
 
     std::string line;
@@ -1422,7 +1612,8 @@ int main() {
         true
         ) {
         if (
-            !uciMode
+            !uciMode &&
+            interactiveConsole
             ) {
             std::cout <<
                 "\n> ";
@@ -1465,6 +1656,7 @@ int main() {
             command == "quit" ||
             command == "exit"
             ) {
+            stopAndJoinUciSearch();
             break;
         }
 
@@ -1480,7 +1672,7 @@ int main() {
             uciMode =
                 true;
 
-
+            const std::lock_guard<std::mutex> lock(uciOutputMutex);
             std::cout <<
                 "id name KnightBot " <<
                 KNIGHTBOT_VERSION <<
@@ -1489,6 +1681,11 @@ int main() {
 
             std::cout <<
                 "id author Joshua Wang\n";
+
+
+            std::cout <<
+                "option name UseNNUE type check default false\n"
+                "option name EvalFile type string default <empty>\n";
 
 
             std::cout <<
@@ -1503,6 +1700,7 @@ int main() {
             command ==
             "isready"
             ) {
+            const std::lock_guard<std::mutex> lock(uciOutputMutex);
             std::cout <<
                 "readyok\n";
 
@@ -1514,8 +1712,12 @@ int main() {
             command ==
             "ucinewgame"
             ) {
+            stopAndJoinUciSearch();
+
             position =
                 chess::startPosition();
+
+            gameHistory = {position.zobristKey};
 
 
             chess::clearTranspositionTable();
@@ -1529,9 +1731,26 @@ int main() {
             command ==
             "position"
             ) {
+            stopAndJoinUciSearch();
+
             handleUciPosition(
                 line,
-                position
+                position,
+                gameHistory
+            );
+
+            continue;
+        }
+
+
+        if (
+            command ==
+            "setoption"
+            ) {
+            stopAndJoinUciSearch();
+
+            handleUciSetOption(
+                line
             );
 
             continue;
@@ -1544,9 +1763,15 @@ int main() {
             ) {
             handleUciGo(
                 line,
-                position
+                position,
+                gameHistory
             );
 
+            continue;
+        }
+
+        if (command == "stop") {
+            stopAndJoinUciSearch();
             continue;
         }
 
@@ -1672,6 +1897,8 @@ int main() {
                         move
                     );
 
+                    gameHistory.push_back(position.zobristKey);
+
 
                     std::cout <<
                         "Played " <<
@@ -1714,7 +1941,7 @@ int main() {
             "eval"
             ) {
             const int score =
-                chess::evaluate(
+                chess::evaluateActive(
                     position
                 );
 
@@ -1767,6 +1994,539 @@ int main() {
                     position
                 );
 }
+
+
+        else if (
+            command ==
+            "evalcompare"
+            ) {
+            const int handcrafted =
+                chess::evaluate(
+                    position
+                );
+
+            std::cout <<
+                "\nEvaluation comparison\n"
+                "------------------------------\n" <<
+                std::showpos <<
+                std::fixed <<
+                std::setprecision(2) <<
+                "Handcrafted: " <<
+                (handcrafted / 100.0) <<
+                '\n';
+
+            if (
+                chess::nnueLoaded()
+                ) {
+                const int nnue =
+                    chess::evaluateNNUE(
+                        position
+                    );
+
+                std::cout <<
+                    "NNUE:        " <<
+                    (nnue / 100.0) <<
+                    '\n';
+            }
+            else {
+                std::cout <<
+                    std::noshowpos <<
+                    "NNUE:        <not loaded>\n";
+            }
+
+            const int active =
+                chess::evaluateActive(
+                    position
+                );
+
+            std::cout <<
+                std::showpos <<
+                "Active:      " <<
+                (active / 100.0) <<
+                std::noshowpos <<
+                '\n';
+        }
+
+
+            else if (
+        command ==
+        "nnueinfo"
+        ) {
+        std::cout <<
+            "UseNNUE: " <<
+            (chess::nnueEnabled() ? "true" : "false") <<
+            '\n' <<
+            "Loaded:  " <<
+            (chess::nnueLoaded() ? "true" : "false") <<
+            '\n';
+
+        if (
+            chess::nnueLoaded()
+            ) {
+            std::cout <<
+                "File:    " <<
+                chess::nnueLoadedFile() <<
+                '\n' <<
+                "Format:  " <<
+                chess::nnueFormatName() <<
+                '\n' <<
+                "Version: " <<
+                chess::nnueFormatVersion() <<
+                '\n';
+
+            if (
+                chess::nnueFormatVersion() ==
+                1
+                ) {
+                std::cout <<
+                    "Inputs:  " <<
+                    chess::NNUE_V1_INPUT_COUNT <<
+                    '\n' <<
+                    "Hidden:  " <<
+                    chess::NNUE_V1_HIDDEN_COUNT <<
+                    '\n';
+            }
+            else if (
+                chess::nnueFormatVersion() ==
+                2
+                ) {
+                std::cout <<
+                    "Features:     " <<
+                    chess::HALFKP_FEATURE_COUNT <<
+                    '\n' <<
+                    "Transformer:  " <<
+                    chess::HALFKP_TRANSFORMER_HIDDEN <<
+                    '\n' <<
+                    "Context:      " <<
+                    chess::HALFKP_CONTEXT_COUNT <<
+                    '\n' <<
+                    "Dense 1:      " <<
+                    chess::HALFKP_DENSE1_COUNT <<
+                    '\n' <<
+                    "Dense 2:      " <<
+                    chess::HALFKP_DENSE2_COUNT <<
+                    '\n';
+            }
+        }
+        }
+
+
+        else if (
+            command ==
+            "nnueverify"
+            ) {
+            if (
+                !chess::nnueLoaded()
+                ) {
+                std::cout <<
+                    "No NNUE network loaded.\n";
+
+                continue;
+            }
+
+            constexpr int TEST_GAMES =
+                100;
+
+            constexpr int MAX_MOVES =
+                200;
+
+            std::mt19937 rng(
+                0x4B4E5545u
+            );
+
+            int positionsChecked =
+                0;
+
+            bool failed =
+                false;
+
+
+            for (
+                int game = 0;
+                game < TEST_GAMES &&
+                !failed;
+                ++game
+                ) {
+                chess::Position pos =
+                    chess::startPosition();
+
+
+                chess::rebuildHalfKPAccumulators(
+                    pos
+                );
+
+
+                for (
+                    int moveNumber = 0;
+                    moveNumber < MAX_MOVES;
+                    ++moveNumber
+                    ) {
+                    const int incremental =
+                        chess::evaluateNNUE(
+                            pos
+                        );
+
+                    const int rebuilt =
+                        chess::evaluateHalfKPFullRebuild(
+                            pos
+                        );
+
+
+                    ++positionsChecked;
+
+
+                    if (
+                        incremental !=
+                        rebuilt
+                        ) {
+                        std::cout <<
+                            "NNUE VERIFY FAILED\n" <<
+                            "Game: " <<
+                            game <<
+                            '\n' <<
+                            "Move: " <<
+                            moveNumber <<
+                            '\n' <<
+                            "Incremental: " <<
+                            incremental <<
+                            '\n' <<
+                            "Rebuilt:     " <<
+                            rebuilt <<
+                            '\n' <<
+                            "FEN: " <<
+                            chess::toFEN(
+                                pos
+                            ) <<
+                            '\n';
+
+                        failed =
+                            true;
+
+                        break;
+                    }
+
+
+                    chess::MoveList moves;
+
+                    chess::generateLegalMoves(
+                        pos,
+                        moves
+                    );
+
+
+                    if (
+                        moves.empty()
+                        ) {
+                        break;
+                    }
+
+
+                    std::uniform_int_distribution<
+                        std::size_t
+                    > distribution(
+                        0,
+                        moves.size() - 1
+                    );
+
+
+                    const chess::Move move =
+                        moves[
+                            distribution(
+                                rng
+                            )
+                        ];
+
+
+                    chess::UndoState undo;
+
+
+                    chess::makeMove(
+                        pos,
+                        move,
+                        undo
+                    );
+
+
+                    chess::updateHalfKPAfterMove(
+                        pos,
+                        move,
+                        undo
+                    );
+
+
+                    const int afterMoveIncremental =
+                        chess::evaluateNNUE(
+                            pos
+                        );
+
+                    const int afterMoveRebuilt =
+                        chess::evaluateHalfKPFullRebuild(
+                            pos
+                        );
+
+
+                    ++positionsChecked;
+
+
+                    if (
+                        afterMoveIncremental !=
+                        afterMoveRebuilt
+                        ) {
+                        std::cout <<
+                            "NNUE VERIFY FAILED AFTER MOVE\n" <<
+                            "Game: " <<
+                            game <<
+                            '\n' <<
+                            "Move: " <<
+                            moveNumber <<
+                            '\n' <<
+                            "Incremental: " <<
+                            afterMoveIncremental <<
+                            '\n' <<
+                            "Rebuilt:     " <<
+                            afterMoveRebuilt <<
+                            '\n' <<
+                            "FEN: " <<
+                            chess::toFEN(
+                                pos
+                            ) <<
+                            '\n';
+
+                        failed =
+                            true;
+
+                        break;
+                    }
+
+
+                    chess::undoMove(
+                        pos,
+                        move,
+                        undo
+                    );
+
+
+                    chess::updateHalfKPAfterUndo(
+                        pos,
+                        move,
+                        undo
+                    );
+
+
+                    const int afterUndoIncremental =
+                        chess::evaluateNNUE(
+                            pos
+                        );
+
+                    const int afterUndoRebuilt =
+                        chess::evaluateHalfKPFullRebuild(
+                            pos
+                        );
+
+
+                    ++positionsChecked;
+
+
+                    if (
+                        afterUndoIncremental !=
+                        afterUndoRebuilt
+                        ) {
+                        std::cout <<
+                            "NNUE VERIFY FAILED AFTER UNDO\n" <<
+                            "Game: " <<
+                            game <<
+                            '\n' <<
+                            "Move: " <<
+                            moveNumber <<
+                            '\n' <<
+                            "Incremental: " <<
+                            afterUndoIncremental <<
+                            '\n' <<
+                            "Rebuilt:     " <<
+                            afterUndoRebuilt <<
+                            '\n' <<
+                            "FEN: " <<
+                            chess::toFEN(
+                                pos
+                            ) <<
+                            '\n';
+
+                        failed =
+                            true;
+
+                        break;
+                    }
+
+
+                    // Make it again so the random game can continue.
+                    chess::makeMove(
+                        pos,
+                        move,
+                        undo
+                    );
+
+                    chess::updateHalfKPAfterMove(
+                        pos,
+                        move,
+                        undo
+                    );
+                }
+            }
+
+
+            if (
+                !failed
+                ) {
+                std::cout <<
+                    "NNUE VERIFY PASSED\n" <<
+                    "Positions checked: " <<
+                    positionsChecked <<
+                    '\n';
+            }
+        }
+
+        else if (
+            command ==
+            "nnue"
+            ) {
+            std::string setting;
+            input >> setting;
+            setting = lowerCopy(setting);
+
+            if (setting == "on") {
+                chess::setNNUEEnabled(true);
+                chess::clearTranspositionTable();
+
+                std::cout << "NNUE enabled";
+
+                if (!chess::nnueLoaded()) {
+                    std::cout <<
+                        " (no network loaded; handcrafted fallback active)";
+                }
+
+                std::cout << ".\n";
+            }
+            else if (setting == "off") {
+                chess::setNNUEEnabled(false);
+                chess::clearTranspositionTable();
+                std::cout << "NNUE disabled.\n";
+            }
+            else {
+                std::cout << "Usage: nnue on|off\n";
+            }
+        }
+
+
+        else if (
+            command ==
+            "nnueload"
+            ) {
+            std::string path;
+            std::getline(input, path);
+            path = trimCopy(path);
+
+            if (path.empty()) {
+                std::cout << "Usage: nnueload <network-file>\n";
+                continue;
+            }
+
+            std::string error;
+
+            if (chess::loadNNUE(path, &error)) {
+                chess::clearTranspositionTable();
+                std::cout << "Loaded NNUE network: " << path << '\n';
+            }
+            else {
+                std::cout << "NNUE load failed: " << error << '\n';
+            }
+        }
+
+
+        else if (
+            command ==
+            "nnuegentest"
+            ) {
+            std::string path;
+            std::getline(input, path);
+            path = trimCopy(path);
+
+            if (path.empty()) {
+                path = "knightbot-test.nnue";
+            }
+
+            std::string error;
+
+            if (chess::writeNNUECompatibilityTestNetwork(path, &error)) {
+                std::cout << "Created compatibility network: " << path << '\n';
+            }
+            else {
+                std::cout << "Unable to create test network: " << error << '\n';
+            }
+        }
+
+
+        else if (
+            command ==
+            "exportpos"
+            ) {
+            std::string path;
+            input >> path;
+
+            if (path.empty()) {
+                std::cout << "Usage: exportpos <file> [target_cp]\n";
+                continue;
+            }
+
+            int target = chess::evaluate(position);
+            int suppliedTarget = 0;
+
+            if (input >> suppliedTarget) {
+                target = suppliedTarget;
+            }
+
+            std::string error;
+
+            if (chess::appendTrainingPosition(
+                    path,
+                    position,
+                    target,
+                    &error
+                )) {
+                std::cout <<
+                    "Exported training position to " << path <<
+                    " with target " << target << " cp.\n";
+            }
+            else {
+                std::cout << "Training export failed: " << error << '\n';
+            }
+        }
+
+
+        else if (
+            command ==
+            "selftest"
+            ) {
+            stopAndJoinUciSearch();
+            chess::runSelfTest();
+        }
+
+
+        else if (
+            command ==
+            "bench"
+            ) {
+            stopAndJoinUciSearch();
+            chess::runBenchmark();
+        }
+
+
+        else if (
+            command ==
+            "benchfull"
+            ) {
+            stopAndJoinUciSearch();
+            chess::runFullBenchmark();
+        }
 
 
         // ====================================================
@@ -1906,6 +2666,8 @@ int main() {
                     result.bestMove
                 );
 
+                gameHistory.push_back(position.zobristKey);
+
 
                 chess::printBoard(
                     position
@@ -1962,6 +2724,8 @@ int main() {
                     position,
                     result.bestMove
                 );
+
+                gameHistory.push_back(position.zobristKey);
 
 
                 chess::printBoard(
@@ -2144,6 +2908,8 @@ int main() {
             position =
                 chess::startPosition();
 
+            gameHistory = {position.zobristKey};
+
 
             chess::clearTranspositionTable();
 
@@ -2192,6 +2958,8 @@ int main() {
                     chess::fromFEN(
                         fen
                     );
+
+                gameHistory = {position.zobristKey};
 
 
                 chess::clearTranspositionTable();
@@ -2282,11 +3050,14 @@ int main() {
 
 
     if (
-        !uciMode
+        !uciMode &&
+        interactiveConsole
         ) {
         std::cout <<
             "\nKnightBot stopped.\n";
     }
+
+    stopAndJoinUciSearch();
 
 
     return 0;

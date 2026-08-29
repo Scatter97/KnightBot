@@ -1,9 +1,11 @@
 #include "search.hpp"
 
 #include "evaluation.hpp"
+#include "nnue.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -22,10 +24,10 @@ namespace chess {
         constexpr int INF = 32000;
         constexpr int MAX_PLY = 128;
 
-        constexpr int MAX_QPLY = 8;
+        constexpr int MAX_QPLY = 10;
         constexpr int DELTA_MARGIN = 150;
 
-        constexpr int ASPIRATION_INITIAL_WINDOW = 25;
+        constexpr int ASPIRATION_INITIAL_WINDOW = 35;
         constexpr int ASPIRATION_MIN_DEPTH = 4;
 
         constexpr int NULL_MOVE_MIN_DEPTH = 3;
@@ -35,6 +37,14 @@ namespace chess {
         constexpr int LMR_MIN_MOVE_INDEX = 4;
 
         constexpr int MAX_CHECK_EXTENSIONS = 2;
+
+        constexpr int RAZOR_MARGIN_DEPTH_1 = 250;
+        constexpr int RAZOR_MARGIN_DEPTH_2 = 450;
+        constexpr int REVERSE_FUTILITY_MARGIN = 100;
+        constexpr int FUTILITY_MOVE_MARGIN = 130;
+
+        constexpr std::uint64_t STOP_CHECK_MASK = 255ULL;
+        constexpr std::uint64_t TIME_CHECK_MASK = 255ULL;
 
 
         // ============================================================
@@ -112,6 +122,33 @@ namespace chess {
         std::size_t ttUsed = 0;
 
         std::uint8_t ttGeneration = 0;
+
+        std::atomic_bool searchStopRequested{false};
+
+
+        // ============================================================
+        // STATIC EVALUATION CACHE
+        // ============================================================
+
+        constexpr std::size_t EVAL_CACHE_SIZE = 1ULL << 16;
+        constexpr std::size_t EVAL_CACHE_MASK = EVAL_CACHE_SIZE - 1;
+
+        struct EvalCacheEntry {
+            std::uint64_t key = 0;
+            int score = 0;
+            bool valid = false;
+        };
+
+        std::array<EvalCacheEntry, EVAL_CACHE_SIZE> evaluationCache{};
+
+        struct SearchContext;
+
+        int cachedEvaluateForSideToMove(
+            Position& pos,
+            int ply,
+            SearchContext& context
+        );
+
 
 
         // ============================================================
@@ -214,13 +251,27 @@ namespace chess {
         }
 
 
+        int scoreToTT(int score, int ply) {
+            if (score >= MATE_THRESHOLD) return score + ply;
+            if (score <= -MATE_THRESHOLD) return score - ply;
+            return score;
+        }
+
+        int scoreFromTT(int score, int ply) {
+            if (score >= MATE_THRESHOLD) return score - ply;
+            if (score <= -MATE_THRESHOLD) return score + ply;
+            return score;
+        }
+
         void storeTT(
             std::uint64_t key,
             int depth,
             int score,
             TTFlag flag,
-            const Move& move
+            const Move& move,
+            int ply
         ) {
+            const int storedScore = scoreToTT(score, ply);
             TTCluster& cluster =
                 clusterForKey(
                     key
@@ -264,7 +315,7 @@ namespace chess {
                             )
                         ) {
                         entry.score =
-                            score;
+                            storedScore;
 
                         entry.depth =
                             depth;
@@ -309,7 +360,7 @@ namespace chess {
                         key;
 
                     entry.score =
-                        score;
+                        storedScore;
 
                     entry.depth =
                         depth;
@@ -380,7 +431,7 @@ namespace chess {
                 key;
 
             victim->score =
-                score;
+                storedScore;
 
             victim->depth =
                 depth;
@@ -422,15 +473,225 @@ namespace chess {
         // SEARCH CONTEXT
         // ============================================================
 
+        struct HalfKPLazyFrame {
+            Move move{};
+            UndoState undo{};
+
+            bool hasMove = false;
+            bool materialized = false;
+        };
+
+
         struct SearchContext {
             std::uint64_t nodes = 0;
 
-            bool useDeadline = false;
+            SearchStats* stats = nullptr;
 
-            std::chrono::steady_clock::time_point deadline{};
+            bool useSoftDeadline = false;
+            bool useHardDeadline = false;
+            std::chrono::steady_clock::time_point softDeadline{};
+            std::chrono::steady_clock::time_point hardDeadline{};
 
             bool stopped = false;
+
+            SearchHistory positionHistory;
+
+            std::array<
+                HalfKPLazyFrame,
+                MAX_PLY
+            > halfKPFrames{};
         };
+
+
+        void materializeCurrentHalfKPFrame(
+            Position& pos,
+            int ply,
+            SearchContext& context
+        ) {
+            if (
+                ply <= 0 ||
+                ply >= MAX_PLY
+                ) {
+                return;
+            }
+
+
+            HalfKPLazyFrame& frame =
+                context.halfKPFrames[
+                    ply
+                ];
+
+
+            if (
+                !frame.hasMove ||
+                frame.materialized
+                ) {
+                return;
+            }
+
+
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->halfKPMaterializations;
+            }
+
+
+            updateHalfKPAfterMove(
+                pos,
+                frame.move,
+                frame.undo
+            );
+
+
+            frame.materialized =
+                true;
+        }
+
+
+        void prepareLazyHalfKPMove(
+            const Move& move,
+            const UndoState& undo,
+            int childPly,
+            SearchContext& context
+        ) {
+            if (
+                childPly <= 0 ||
+                childPly >= MAX_PLY
+                ) {
+                return;
+            }
+
+
+            HalfKPLazyFrame& frame =
+                context.halfKPFrames[
+                    childPly
+                ];
+
+
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->halfKPPendingChildren;
+            }
+
+
+            frame.move =
+                move;
+
+            frame.undo =
+                undo;
+
+            frame.hasMove =
+                true;
+
+            frame.materialized =
+                false;
+        }
+
+
+        void finishLazyHalfKPMove(
+            Position& pos,
+            int childPly,
+            SearchContext& context
+        ) {
+            if (
+                childPly <= 0 ||
+                childPly >= MAX_PLY
+                ) {
+                return;
+            }
+
+
+            HalfKPLazyFrame& frame =
+                context.halfKPFrames[
+                    childPly
+                ];
+
+
+            if (
+                frame.hasMove &&
+                frame.materialized
+                ) {
+                updateHalfKPAfterUndo(
+                    pos,
+                    frame.move,
+                    frame.undo
+                );
+            }
+
+            else if (
+                frame.hasMove &&
+                context.stats != nullptr
+                ) {
+                ++context.stats->halfKPLazySkips;
+            }
+
+
+            frame =
+                HalfKPLazyFrame{};
+        }
+
+
+        int cachedEvaluateForSideToMove(
+            Position& pos,
+            int ply,
+            SearchContext& context
+        ) {
+            EvalCacheEntry& entry =
+                evaluationCache[
+                    pos.zobristKey &
+                    EVAL_CACHE_MASK
+                ];
+
+
+            if (
+                entry.valid &&
+                entry.key ==
+                pos.zobristKey
+                ) {
+                if (
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->evalCacheHits;
+                }
+
+                return
+                    entry.score;
+            }
+
+
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->evalCacheMisses;
+                ++context.stats->evaluations;
+            }
+
+
+            materializeCurrentHalfKPFrame(
+                pos,
+                ply,
+                context
+            );
+
+
+            const int score =
+                evaluateForSideToMove(
+                    pos
+                );
+
+
+            entry = {
+                pos.zobristKey,
+                score,
+                true
+            };
+
+
+            return
+                score;
+        }
 
 
         // ============================================================
@@ -572,26 +833,24 @@ namespace chess {
             SearchContext& context
         ) {
             if (
-                !context.useDeadline
+                (context.nodes & STOP_CHECK_MASK) == 0 &&
+                searchStopRequested.load(std::memory_order_relaxed)
                 ) {
-                return false;
+                context.stopped = true;
+                return true;
             }
-
 
             if (
-                (
-                    context.nodes &
-                    4095ULL
-                    ) != 0
+                !context.useHardDeadline ||
+                (context.nodes & TIME_CHECK_MASK) != 0
                 ) {
                 return false;
             }
-
 
             if (
                 std::chrono::steady_clock::now()
                 >=
-                context.deadline
+                context.hardDeadline
                 ) {
                 context.stopped =
                     true;
@@ -601,6 +860,44 @@ namespace chess {
 
 
             return false;
+        }
+
+
+        bool isRuleDraw(
+            const Position& pos,
+            const SearchContext& context
+        ) {
+            if (pos.halfmoveClock >= 100) {
+                return true;
+            }
+
+            int occurrences = 0;
+            const std::size_t reversibleSpan =
+                static_cast<std::size_t>(std::max(0, pos.halfmoveClock));
+            const std::size_t start =
+                context.positionHistory.size() > reversibleSpan + 1
+                ? context.positionHistory.size() - reversibleSpan - 1
+                : 0;
+
+            for (std::size_t i = start;
+                 i < context.positionHistory.size();
+                 ++i) {
+                if (context.positionHistory[i] == pos.zobristKey &&
+                    ++occurrences >= 3) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
+        void pushPosition(SearchContext& context, const Position& pos) {
+            context.positionHistory.push_back(pos.zobristKey);
+        }
+
+        void popPosition(SearchContext& context) {
+            context.positionHistory.pop_back();
         }
 
 
@@ -1387,24 +1684,9 @@ namespace chess {
             if (
                 capturedPiece != '.'
                 ) {
-                const int see =
-                    staticExchangeEvaluation(
-                        pos,
-                        move
-                    );
-
-
-                if (
-                    see >= 0
-                    ) {
-                    score +=
-                        40000;
-                }
-
-                else {
-                    score +=
-                        8000;
-                }
+                // Keep the ubiquitous ordering path cheap. Full SEE is
+                // reserved for tactical pruning in quiescence.
+                score += 40000;
 
 
                 // MVV/LVA-like component.
@@ -1421,10 +1703,6 @@ namespace chess {
                         movingPiece
                     );
 
-
-                score +=
-                    see *
-                    4;
             }
 
 
@@ -1666,7 +1944,7 @@ namespace chess {
                     ][
                         0
                     ] =
-                            move;
+                        move;
             }
 
 
@@ -1872,6 +2150,10 @@ namespace chess {
             int qply,
             SearchContext& context
         ) {
+            if (isRuleDraw(pos, context)) {
+                return 0;
+            }
+
             // ========================================================
             // INSUFFICIENT MATERIAL
             // ========================================================
@@ -1884,9 +2166,13 @@ namespace chess {
                 return 0;
             }
 
-
             ++context.nodes;
 
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->qsearchNodes;
+            }
 
             if (
                 timeExpired(
@@ -1896,22 +2182,18 @@ namespace chess {
                 return 0;
             }
 
-
             const bool checked =
                 inCheck(
                     pos,
                     pos.whiteToMove
                 );
 
-
             MoveList moves;
-
 
             generateLegalMoves(
                 pos,
                 moves
             );
-
 
             if (
                 moves.empty()
@@ -1924,21 +2206,20 @@ namespace chess {
                         ply;
                 }
 
-
                 return 0;
             }
-
 
             if (
                 qply >=
                 MAX_QPLY
                 ) {
                 return
-                    evaluateForSideToMove(
-                        pos
+                    cachedEvaluateForSideToMove(
+                        pos,
+                        ply,
+                        context
                     );
             }
-
 
             // ========================================================
             // CHECK EVASIONS
@@ -1954,13 +2235,17 @@ namespace chess {
                     ply
                 );
 
-
                 for (
                     const Move& move :
                     moves
                     ) {
-                    UndoState undo;
+                    materializeCurrentHalfKPFrame(
+                        pos,
+                        ply,
+                        context
+                    );
 
+                    UndoState undo;
 
                     makeMove(
                         pos,
@@ -1968,6 +2253,14 @@ namespace chess {
                         undo
                     );
 
+                    prepareLazyHalfKPMove(
+                        move,
+                        undo,
+                        ply + 1,
+                        context
+                    );
+
+                    pushPosition(context, pos);
 
                     const int score =
                         -quiescence(
@@ -1979,13 +2272,19 @@ namespace chess {
                             context
                         );
 
-
                     undoMove(
                         pos,
                         move,
                         undo
                     );
 
+                    finishLazyHalfKPMove(
+                        pos,
+                        ply + 1,
+                        context
+                    );
+
+                    popPosition(context);
 
                     if (
                         context.stopped
@@ -1993,13 +2292,17 @@ namespace chess {
                         return 0;
                     }
 
-
                     if (
                         score >= beta
                         ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->betaCutoffs;
+                        }
+
                         return score;
                     }
-
 
                     if (
                         score > alpha
@@ -2009,28 +2312,32 @@ namespace chess {
                     }
                 }
 
-
                 return alpha;
             }
-
 
             // ========================================================
             // STAND PAT
             // ========================================================
 
             const int standPat =
-                evaluateForSideToMove(
-                    pos
+                cachedEvaluateForSideToMove(
+                    pos,
+                    ply,
+                    context
                 );
-
 
             if (
                 standPat >= beta
                 ) {
+                if (
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->betaCutoffs;
+                }
+
                 return
                     standPat;
             }
-
 
             if (
                 standPat > alpha
@@ -2039,9 +2346,7 @@ namespace chess {
                     standPat;
             }
 
-
             MoveList tactical;
-
 
             // ========================================================
             // BUILD TACTICAL MOVE LIST
@@ -2057,14 +2362,12 @@ namespace chess {
                         move
                     );
 
-
                 if (
                     !capture &&
                     !move.promotion
                     ) {
                     continue;
                 }
-
 
                 if (
                     capture &&
@@ -2078,7 +2381,6 @@ namespace chess {
                             )
                         );
 
-
                     if (
                         standPat +
                         gain +
@@ -2086,10 +2388,15 @@ namespace chess {
                         <
                         alpha
                         ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->qsearchDeltaPrunes;
+                        }
+
                         continue;
                     }
                 }
-
 
                 const int see =
                     staticExchangeEvaluation(
@@ -2097,20 +2404,23 @@ namespace chess {
                         move
                     );
 
-
                 if (
                     see < 0 &&
                     !move.promotion
                     ) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->qsearchSeePrunes;
+                    }
+
                     continue;
                 }
-
 
                 tactical.push_back(
                     move
                 );
             }
-
 
             orderMoves(
                 pos,
@@ -2118,7 +2428,6 @@ namespace chess {
                 nullptr,
                 ply
             );
-
 
             // ========================================================
             // SEARCH TACTICAL MOVES
@@ -2128,8 +2437,13 @@ namespace chess {
                 const Move& move :
                 tactical
                 ) {
-                UndoState undo;
+                materializeCurrentHalfKPFrame(
+                    pos,
+                    ply,
+                    context
+                );
 
+                UndoState undo;
 
                 makeMove(
                     pos,
@@ -2137,6 +2451,14 @@ namespace chess {
                     undo
                 );
 
+                prepareLazyHalfKPMove(
+                    move,
+                    undo,
+                    ply + 1,
+                    context
+                );
+
+                pushPosition(context, pos);
 
                 const int score =
                     -quiescence(
@@ -2148,13 +2470,19 @@ namespace chess {
                         context
                     );
 
-
                 undoMove(
                     pos,
                     move,
                     undo
                 );
 
+                finishLazyHalfKPMove(
+                    pos,
+                    ply + 1,
+                    context
+                );
+
+                popPosition(context);
 
                 if (
                     context.stopped
@@ -2162,13 +2490,17 @@ namespace chess {
                     return 0;
                 }
 
-
                 if (
                     score >= beta
                     ) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->betaCutoffs;
+                    }
+
                     return score;
                 }
-
 
                 if (
                     score > alpha
@@ -2178,7 +2510,6 @@ namespace chess {
                 }
             }
 
-
             return alpha;
         }
 
@@ -2186,10 +2517,9 @@ namespace chess {
         // ============================================================
         // NEGAMAX
         // ============================================================
-
        // ============================================================
-// NEGAMAX
-// ============================================================
+        // NEGAMAX
+        // ============================================================
 
         int negamax(
             Position& pos,
@@ -2201,6 +2531,10 @@ namespace chess {
             bool allowNull,
             int checkExtensions
         ) {
+            if (isRuleDraw(pos, context)) {
+                return 0;
+            }
+
             // ========================================================
             // INSUFFICIENT MATERIAL
             // ========================================================
@@ -2213,7 +2547,6 @@ namespace chess {
                 return 0;
             }
 
-
             // ========================================================
             // MAXIMUM SEARCH PLY
             // ========================================================
@@ -2223,11 +2556,12 @@ namespace chess {
                 MAX_PLY - 1
                 ) {
                 return
-                    evaluateForSideToMove(
-                        pos
+                    cachedEvaluateForSideToMove(
+                        pos,
+                        ply,
+                        context
                     );
             }
-
 
             // ========================================================
             // QUIESCENCE
@@ -2247,9 +2581,7 @@ namespace chess {
                     );
             }
 
-
             ++context.nodes;
-
 
             if (
                 timeExpired(
@@ -2259,29 +2591,30 @@ namespace chess {
                 return 0;
             }
 
-
             const int originalAlpha =
                 alpha;
 
             const int originalBeta =
                 beta;
 
-
             const std::uint64_t key =
                 pos.zobristKey;
-
 
             Move ttMove{};
 
             bool hasTTMove =
                 false;
 
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->ttProbes;
+            }
 
             TTEntry* ttEntry =
                 probeTT(
                     key
                 );
-
 
             // ========================================================
             // TT PROBE
@@ -2290,8 +2623,17 @@ namespace chess {
             if (
                 ttEntry != nullptr
                 ) {
+                if (
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->ttHits;
+                }
+
                 ttEntry->generation =
                     ttGeneration;
+
+                const int ttScore =
+                    scoreFromTT(ttEntry->score, ply);
 
 
                 if (
@@ -2306,7 +2648,6 @@ namespace chess {
                         true;
                 }
 
-
                 if (
                     ttEntry->depth >=
                     depth
@@ -2315,10 +2656,15 @@ namespace chess {
                         ttEntry->flag ==
                         TTFlag::Exact
                         ) {
-                        return
-                            ttEntry->score;
-                    }
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->ttCutoffs;
+                        }
 
+                        return
+                            ttScore;
+                    }
 
                     if (
                         ttEntry->flag ==
@@ -2327,7 +2673,7 @@ namespace chess {
                         alpha =
                             std::max(
                                 alpha,
-                                ttEntry->score
+                                ttScore
                             );
                     }
 
@@ -2338,20 +2684,24 @@ namespace chess {
                         beta =
                             std::min(
                                 beta,
-                                ttEntry->score
+                                ttScore
                             );
                     }
-
 
                     if (
                         alpha >= beta
                         ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->ttCutoffs;
+                        }
+
                         return
-                            ttEntry->score;
+                            ttScore;
                     }
                 }
             }
-
 
             const bool checked =
                 inCheck(
@@ -2359,6 +2709,56 @@ namespace chess {
                     pos.whiteToMove
                 );
 
+            const bool pvNode = beta - alpha > 1;
+            const int staticEval = checked
+                ? 0
+                : cachedEvaluateForSideToMove(
+                    pos,
+                    ply,
+                    context
+                );
+
+            // Conservative forward pruning: only at non-PV nodes, never
+            // in check, and never close to mate bounds.
+            if (!checked && !pvNode &&
+                alpha > -MATE_THRESHOLD && beta < MATE_THRESHOLD) {
+                if (depth <= 2) {
+                    const int margin = depth == 1
+                        ? RAZOR_MARGIN_DEPTH_1
+                        : RAZOR_MARGIN_DEPTH_2;
+                    if (staticEval + margin <= alpha) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->razorAttempts;
+                        }
+
+                        const int razorScore =
+                            quiescence(pos, alpha, beta, ply, 0, context);
+
+                        if (razorScore <= alpha) {
+                            if (
+                                context.stats != nullptr
+                                ) {
+                                ++context.stats->razorCutoffs;
+                            }
+
+                            return razorScore;
+                        }
+                    }
+                }
+
+                if (depth <= 3 &&
+                    staticEval - REVERSE_FUTILITY_MARGIN * depth >= beta) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->reverseFutilityCutoffs;
+                    }
+
+                    return staticEval;
+                }
+            }
 
             // ========================================================
             // NULL MOVE
@@ -2373,9 +2773,25 @@ namespace chess {
                     pos,
                     pos.whiteToMove
                 ) &&
+                pos.halfmoveClock < 99 &&
+                staticEval >= beta &&
+                beta > -MATE_THRESHOLD &&
                 beta <
                 MATE_THRESHOLD
                 ) {
+                if (
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->nullMoveAttempts;
+                }
+
+                materializeCurrentHalfKPFrame(
+                    pos,
+                    ply,
+                    context
+                );
+
+
                 NullMoveUndo nullUndo;
 
 
@@ -2389,7 +2805,6 @@ namespace chess {
                     NULL_MOVE_BASE_REDUCTION +
                     depth / 6;
 
-
                 const int nullDepth =
                     std::max(
                         0,
@@ -2397,7 +2812,6 @@ namespace chess {
                         1 -
                         reduction
                     );
-
 
                 const int nullScore =
                     -negamax(
@@ -2411,12 +2825,10 @@ namespace chess {
                         checkExtensions
                     );
 
-
                 undoNullMove(
                     pos,
                     nullUndo
                 );
-
 
                 if (
                     context.stopped
@@ -2424,10 +2836,15 @@ namespace chess {
                     return 0;
                 }
 
-
                 if (
                     nullScore >= beta
                     ) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->nullMoveCutoffs;
+                    }
+
                     if (
                         nullScore >=
                         MATE_THRESHOLD
@@ -2435,12 +2852,10 @@ namespace chess {
                         return beta;
                     }
 
-
                     return
                         nullScore;
                 }
             }
-
 
             // ========================================================
             // LEGAL MOVES
@@ -2448,12 +2863,10 @@ namespace chess {
 
             MoveList moves;
 
-
             generateLegalMoves(
                 pos,
                 moves
             );
-
 
             if (
                 moves.empty()
@@ -2466,10 +2879,8 @@ namespace chess {
                         ply;
                 }
 
-
                 return 0;
             }
-
 
             orderMoves(
                 pos,
@@ -2480,22 +2891,17 @@ namespace chess {
                 ply
             );
 
-
             int bestScore =
                 -INF;
-
 
             Move bestMove =
                 moves.front();
 
-
             bool firstMove =
                 true;
 
-
             int moveIndex =
                 0;
-
 
             // ========================================================
             // SEARCH MOVES
@@ -2511,10 +2917,8 @@ namespace chess {
                         move
                     );
 
-
                 const bool promotion =
                     move.promotion != 0;
-
 
                 const bool isTTMove =
                     hasTTMove &&
@@ -2523,6 +2927,11 @@ namespace chess {
                         ttMove
                     );
 
+                materializeCurrentHalfKPFrame(
+                    pos,
+                    ply,
+                    context
+                );
 
                 UndoState undo;
 
@@ -2534,12 +2943,19 @@ namespace chess {
                 );
 
 
+                prepareLazyHalfKPMove(
+                    move,
+                    undo,
+                    ply + 1,
+                    context
+                );
+
+
                 const bool givesCheck =
                     inCheck(
                         pos,
                         pos.whiteToMove
                     );
-
 
                 // ====================================================
                 // CHECK EXTENSION
@@ -2550,6 +2966,12 @@ namespace chess {
                     checkExtensions <
                     MAX_CHECK_EXTENSIONS;
 
+                if (
+                    extendCheck &&
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->checkExtensions;
+                }
 
                 const int childDepth =
                     depth -
@@ -2560,7 +2982,6 @@ namespace chess {
                         : 0
                         );
 
-
                 const int childCheckExtensions =
                     checkExtensions +
                     (
@@ -2569,10 +2990,34 @@ namespace chess {
                         : 0
                         );
 
+                const bool quiet =
+                    !capture && !promotion;
+                if (moveIndex > 0 && quiet && !checked && !givesCheck &&
+                    !pvNode && !isTTMove && depth <= 2 &&
+                    alpha > -MATE_THRESHOLD &&
+                    staticEval + FUTILITY_MOVE_MARGIN * depth <= alpha) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->moveFutilityPrunes;
+                    }
+
+                    undoMove(pos, move, undo);
+
+                    finishLazyHalfKPMove(
+                        pos,
+                        ply + 1,
+                        context
+                    );
+
+                    ++moveIndex;
+                    continue;
+                }
+
+                pushPosition(context, pos);
 
                 int score =
                     0;
-
 
                 // ====================================================
                 // FIRST MOVE: FULL WINDOW
@@ -2593,22 +3038,15 @@ namespace chess {
                             childCheckExtensions
                         );
 
-
                     firstMove =
                         false;
                 }
-
 
                 // ====================================================
                 // LATER MOVES
                 // ====================================================
 
                 else {
-                    const bool quiet =
-                        !capture &&
-                        !promotion;
-
-
                     const bool canReduce =
                         depth >=
                         LMR_MIN_DEPTH
@@ -2624,20 +3062,32 @@ namespace chess {
                         &&
                         !isTTMove;
 
+                    const bool killer =
+                        ply >= 0 && ply < MAX_PLY &&
+                        ((validStoredMove(killerMoves[ply][0]) &&
+                          sameMove(move, killerMoves[ply][0])) ||
+                         (validStoredMove(killerMoves[ply][1]) &&
+                          sameMove(move, killerMoves[ply][1])));
+
 
                     // =================================================
                     // LMR
                     // =================================================
 
                     if (
-                        canReduce
+                        canReduce && !killer && alpha > -MATE_THRESHOLD
                         ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->lmrReductions;
+                        }
+
                         const int reduction =
                             lateMoveReduction(
                                 depth,
                                 moveIndex
                             );
-
 
                         const int reducedDepth =
                             std::max(
@@ -2645,7 +3095,6 @@ namespace chess {
                                 childDepth -
                                 reduction
                             );
-
 
                         score =
                             -negamax(
@@ -2659,10 +3108,15 @@ namespace chess {
                                 childCheckExtensions
                             );
 
-
                         if (
                             score > alpha
                             ) {
+                            if (
+                                context.stats != nullptr
+                                ) {
+                                ++context.stats->lmrResearches;
+                            }
+
                             score =
                                 -negamax(
                                     pos,
@@ -2675,11 +3129,16 @@ namespace chess {
                                     childCheckExtensions
                                 );
 
-
                             if (
                                 score > alpha &&
                                 score < beta
                                 ) {
+                                if (
+                                    context.stats != nullptr
+                                    ) {
+                                    ++context.stats->pvsResearches;
+                                }
+
                                 score =
                                     -negamax(
                                         pos,
@@ -2694,7 +3153,6 @@ namespace chess {
                             }
                         }
                     }
-
 
                     // =================================================
                     // NORMAL PVS
@@ -2713,11 +3171,16 @@ namespace chess {
                                 childCheckExtensions
                             );
 
-
                         if (
                             score > alpha &&
                             score < beta
                             ) {
+                            if (
+                                context.stats != nullptr
+                                ) {
+                                ++context.stats->pvsResearches;
+                            }
+
                             score =
                                 -negamax(
                                     pos,
@@ -2733,7 +3196,6 @@ namespace chess {
                     }
                 }
 
-
                 undoMove(
                     pos,
                     move,
@@ -2741,12 +3203,20 @@ namespace chess {
                 );
 
 
+                finishLazyHalfKPMove(
+                    pos,
+                    ply + 1,
+                    context
+                );
+
+
+                popPosition(context);
+
                 if (
                     context.stopped
                     ) {
                     return 0;
                 }
-
 
                 if (
                     score >
@@ -2759,7 +3229,6 @@ namespace chess {
                         move;
                 }
 
-
                 if (
                     score >
                     alpha
@@ -2768,10 +3237,15 @@ namespace chess {
                         score;
                 }
 
-
                 if (
                     alpha >= beta
                     ) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->betaCutoffs;
+                    }
+
                     recordKiller(
                         pos,
                         move,
@@ -2779,21 +3253,17 @@ namespace chess {
                         depth
                     );
 
-
                     break;
                 }
 
-
                 ++moveIndex;
             }
-
 
             // ========================================================
             // TT STORE
             // ========================================================
 
             TTFlag flag;
-
 
             if (
                 bestScore <=
@@ -2816,15 +3286,14 @@ namespace chess {
                     TTFlag::Exact;
             }
 
-
             storeTT(
                 key,
                 depth,
                 bestScore,
                 flag,
-                bestMove
+                bestMove,
+                ply
             );
-
 
             return bestScore;
         }
@@ -2839,7 +3308,6 @@ namespace chess {
         ) {
             std::vector<Move> pv;
 
-
             pv.reserve(
                 static_cast<
                 std::size_t
@@ -2847,7 +3315,6 @@ namespace chess {
                     maxDepth
                     )
             );
-
 
             for (
                 int i = 0;
@@ -2859,7 +3326,6 @@ namespace chess {
                         pos.zobristKey
                     );
 
-
                 if (
                     entry == nullptr ||
                     !validStoredMove(
@@ -2869,23 +3335,18 @@ namespace chess {
                     break;
                 }
 
-
                 const Move move =
                     entry->bestMove;
 
-
                 MoveList legal;
-
 
                 generateLegalMoves(
                     pos,
                     legal
                 );
 
-
                 bool found =
                     false;
-
 
                 for (
                     const Move& candidate :
@@ -2904,18 +3365,15 @@ namespace chess {
                     }
                 }
 
-
                 if (
                     !found
                     ) {
                     break;
                 }
 
-
                 pv.push_back(
                     move
                 );
-
 
                 makeMove(
                     pos,
@@ -2923,10 +3381,8 @@ namespace chess {
                 );
             }
 
-
             return pv;
         }
-
 
         // ============================================================
         // ROOT SEARCH
@@ -2941,10 +3397,8 @@ namespace chess {
         ) {
             SearchResult result;
 
-
             result.depth =
                 depth;
-
 
             const int originalAlpha =
                 alpha;
@@ -2952,22 +3406,18 @@ namespace chess {
             const int originalBeta =
                 beta;
 
-
             MoveList moves;
-
 
             generateLegalMoves(
                 pos,
                 moves
             );
 
-
             if (
                 moves.empty()
                 ) {
                 result.hasMove =
                     false;
-
 
                 result.score =
                     inCheck(
@@ -2977,24 +3427,33 @@ namespace chess {
                     ? -MATE_SCORE
                     : 0;
 
-
                 return result;
             }
 
+            if (isRuleDraw(pos, context)) {
+                result.hasMove = true;
+                result.bestMove = moves.front();
+                result.score = 0;
+                result.pv = {result.bestMove};
+                return result;
+            }
 
             result.hasMove =
                 true;
 
-
             const std::uint64_t rootKey =
                 pos.zobristKey;
-
 
             Move ttMove{};
 
             bool hasTTMove =
                 false;
 
+            if (
+                context.stats != nullptr
+                ) {
+                ++context.stats->ttProbes;
+            }
 
             if (
                 TTEntry* entry =
@@ -3002,9 +3461,14 @@ namespace chess {
                     rootKey
                 )
                 ) {
+                if (
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->ttHits;
+                }
+
                 entry->generation =
                     ttGeneration;
-
 
                 if (
                     validStoredMove(
@@ -3019,7 +3483,6 @@ namespace chess {
                 }
             }
 
-
             orderMoves(
                 pos,
                 moves,
@@ -3029,18 +3492,14 @@ namespace chess {
                 0
             );
 
-
             int bestScore =
                 -INF;
-
 
             Move bestMove =
                 moves.front();
 
-
             bool firstMove =
                 true;
-
 
             for (
                 const Move& move :
@@ -3048,13 +3507,18 @@ namespace chess {
                 ) {
                 UndoState undo;
 
-
                 makeMove(
                     pos,
                     move,
                     undo
                 );
 
+                prepareLazyHalfKPMove(
+                    move,
+                    undo,
+                    1,
+                    context
+                );
 
                 const bool givesCheck =
                     inCheck(
@@ -3062,12 +3526,17 @@ namespace chess {
                         pos.whiteToMove
                     );
 
-
                 const bool extendCheck =
                     givesCheck &&
                     MAX_CHECK_EXTENSIONS >
                     0;
 
+                if (
+                    extendCheck &&
+                    context.stats != nullptr
+                    ) {
+                    ++context.stats->checkExtensions;
+                }
 
                 const int childDepth =
                     depth -
@@ -3078,16 +3547,15 @@ namespace chess {
                         : 0
                         );
 
-
                 const int childCheckExtensions =
                     extendCheck
                     ? 1
                     : 0;
 
+                pushPosition(context, pos);
 
                 int score =
                     0;
-
 
                 // ====================================================
                 // FIRST MOVE
@@ -3108,11 +3576,9 @@ namespace chess {
                             childCheckExtensions
                         );
 
-
                     firstMove =
                         false;
                 }
-
 
                 // ====================================================
                 // PVS
@@ -3131,11 +3597,16 @@ namespace chess {
                             childCheckExtensions
                         );
 
-
                     if (
                         score > alpha &&
                         score < beta
                         ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->pvsResearches;
+                        }
+
                         score =
                             -negamax(
                                 pos,
@@ -3150,20 +3621,25 @@ namespace chess {
                     }
                 }
 
-
                 undoMove(
                     pos,
                     move,
                     undo
                 );
 
+                finishLazyHalfKPMove(
+                    pos,
+                    1,
+                    context
+                );
+
+                popPosition(context);
 
                 if (
                     context.stopped
                     ) {
                     break;
                 }
-
 
                 if (
                     score >
@@ -3176,7 +3652,6 @@ namespace chess {
                         move;
                 }
 
-
                 if (
                     score >
                     alpha
@@ -3185,14 +3660,18 @@ namespace chess {
                         score;
                 }
 
-
                 if (
                     alpha >= beta
                     ) {
+                    if (
+                        context.stats != nullptr
+                        ) {
+                        ++context.stats->betaCutoffs;
+                    }
+
                     break;
                 }
             }
-
 
             if (
                 !context.stopped
@@ -3203,9 +3682,7 @@ namespace chess {
                 result.score =
                     bestScore;
 
-
                 TTFlag flag;
-
 
                 if (
                     bestScore <=
@@ -3215,7 +3692,6 @@ namespace chess {
                         TTFlag::UpperBound;
                 }
 
-
                 else if (
                     bestScore >=
                     originalBeta
@@ -3224,21 +3700,19 @@ namespace chess {
                         TTFlag::LowerBound;
                 }
 
-
                 else {
                     flag =
                         TTFlag::Exact;
                 }
-
 
                 storeTT(
                     rootKey,
                     depth,
                     bestScore,
                     flag,
-                    bestMove
+                    bestMove,
+                    0
                 );
-
 
                 result.pv =
                     extractPV(
@@ -3247,10 +3721,8 @@ namespace chess {
                     );
             }
 
-
             return result;
         }
-
 
         // ============================================================
         // ITERATIVE DEEPENING + ASPIRATION
@@ -3259,46 +3731,56 @@ namespace chess {
         SearchResult iterativeSearch(
             const Position& rootPosition,
             int maxDepth,
-            bool useDeadline,
-            std::chrono::steady_clock::time_point deadline,
-            const SearchInfoCallback& infoCallback
+            bool useSoftDeadline,
+            std::chrono::steady_clock::time_point softDeadline,
+            bool useHardDeadline,
+            std::chrono::steady_clock::time_point hardDeadline,
+            const SearchInfoCallback& infoCallback,
+            const SearchHistory& history,
+            SearchStats* stats
         ) {
             const auto start =
                 std::chrono::steady_clock::now();
 
-
             Position pos =
                 rootPosition;
 
-
             SearchContext context;
 
+            context.stats =
+                stats;
 
-            context.useDeadline =
-                useDeadline;
 
-            context.deadline =
-                deadline;
+            rebuildHalfKPAccumulators(
+                pos
+            );
 
+
+            context.useSoftDeadline = useSoftDeadline;
+            context.useHardDeadline = useHardDeadline;
+            context.softDeadline = softDeadline;
+            context.hardDeadline = hardDeadline;
+            context.positionHistory = history;
+
+            if (context.positionHistory.empty() ||
+                context.positionHistory.back() != pos.zobristKey) {
+                context.positionHistory.push_back(pos.zobristKey);
+            }
 
             SearchResult bestCompleted;
 
-
             MoveList rootMoves;
-
 
             generateLegalMoves(
                 pos,
                 rootMoves
             );
 
-
             if (
                 rootMoves.empty()
                 ) {
                 bestCompleted.hasMove =
                     false;
-
 
                 bestCompleted.score =
                     inCheck(
@@ -3308,10 +3790,8 @@ namespace chess {
                     ? -MATE_SCORE
                     : 0;
 
-
                 const auto end =
                     std::chrono::steady_clock::now();
-
 
                 bestCompleted.seconds =
                     std::chrono::duration<double>(
@@ -3319,22 +3799,20 @@ namespace chess {
                         start
                     ).count();
 
-
                 return bestCompleted;
             }
-
 
             bestCompleted.hasMove =
                 true;
 
-
             bestCompleted.bestMove =
                 rootMoves.front();
-
 
             int previousScore =
                 0;
 
+            int stableBestMoveDepths = 0;
+            int stableScoreDepths = 0;
 
             for (
                 int depth = 1;
@@ -3342,21 +3820,18 @@ namespace chess {
                 ++depth
                 ) {
                 if (
-                    useDeadline &&
-                    std::chrono::steady_clock::now()
-                    >=
-                    deadline
+                    searchStopRequested.load(std::memory_order_relaxed) ||
+                    (useHardDeadline &&
+                     std::chrono::steady_clock::now() >= hardDeadline)
                     ) {
+                    context.stopped = true;
                     break;
                 }
-
 
                 // New TT generation for each completed depth attempt.
                 ++ttGeneration;
 
-
                 SearchResult current;
-
 
                 // ====================================================
                 // FULL WINDOW AT SHALLOW DEPTH
@@ -3376,7 +3851,6 @@ namespace chess {
                         );
                 }
 
-
                 // ====================================================
                 // ASPIRATION WINDOWS
                 // ====================================================
@@ -3385,7 +3859,6 @@ namespace chess {
                     int window =
                         ASPIRATION_INITIAL_WINDOW;
 
-
                     int alpha =
                         std::max(
                             -INF,
@@ -3393,14 +3866,12 @@ namespace chess {
                             window
                         );
 
-
                     int beta =
                         std::min(
                             INF,
                             previousScore +
                             window
                         );
-
 
                     while (
                         true
@@ -3414,13 +3885,11 @@ namespace chess {
                                 context
                             );
 
-
                         if (
                             context.stopped
                             ) {
                             break;
                         }
-
 
                         // ============================================
                         // FAIL LOW
@@ -3431,8 +3900,8 @@ namespace chess {
                             alpha
                             ) {
                             window *=
-                                2;
 
+                                2;
 
                             if (
                                 window >=
@@ -3445,7 +3914,6 @@ namespace chess {
                                     INF;
                             }
 
-
                             else {
                                 alpha =
                                     std::max(
@@ -3453,7 +3921,6 @@ namespace chess {
                                         previousScore -
                                         window
                                     );
-
 
                                 beta =
                                     std::min(
@@ -3463,10 +3930,14 @@ namespace chess {
                                     );
                             }
 
+                            if (
+                                context.stats != nullptr
+                                ) {
+                                ++context.stats->aspirationResearches;
+                            }
 
                             continue;
                         }
-
 
                         // ============================================
                         // FAIL HIGH
@@ -3477,8 +3948,8 @@ namespace chess {
                             beta
                             ) {
                             window *=
-                                2;
 
+                                2;
 
                             if (
                                 window >=
@@ -3491,7 +3962,6 @@ namespace chess {
                                     INF;
                             }
 
-
                             else {
                                 alpha =
                                     std::max(
@@ -3499,7 +3969,6 @@ namespace chess {
                                         previousScore -
                                         window
                                     );
-
 
                                 beta =
                                     std::min(
@@ -3509,15 +3978,18 @@ namespace chess {
                                     );
                             }
 
+                            if (
+                                context.stats != nullptr
+                                ) {
+                                ++context.stats->aspirationResearches;
+                            }
 
                             continue;
                         }
 
-
                         break;
                     }
                 }
-
 
                 if (
                     context.stopped
@@ -3525,13 +3997,11 @@ namespace chess {
                     break;
                 }
 
-
                 current.nodes =
                     context.nodes;
 
                 current.depth =
                     depth;
-
 
                 // ====================================================
                 // ELAPSED TIME FOR THIS ITERATION
@@ -3540,38 +4010,31 @@ namespace chess {
                 const auto iterationEnd =
                     std::chrono::steady_clock::now();
 
-
                 current.seconds =
                     std::chrono::duration<double>(
                         iterationEnd -
                         start
                     ).count();
 
-
                 current.stopped =
                     false;
 
 
-                // ====================================================
-                // COMPLETED ITERATION
-                // ====================================================
-
                 bestCompleted =
                     current;
-
 
                 previousScore =
                     current.score;
 
 
                 // ====================================================
-                // SEARCH PROGRESS CALLBACK
+                // COMPLETED ITERATION
                 // ====================================================
                 //
                 // Only report FULLY COMPLETED depths.
                 //
                 // If depth 8 gets interrupted by the clock, for example,
-                // depth 8 is not reported. Depth 7 remains the last valid
+                // depth 8 is not reported. Depth 7 remains the last
                 // completed result.
                 //
                 // ====================================================
@@ -3583,7 +4046,6 @@ namespace chess {
                         current
                     );
                 }
-
 
                 // ====================================================
                 // MATE FOUND
@@ -3598,16 +4060,20 @@ namespace chess {
                     ) {
                     break;
                 }
-                } // end iterative-deepening depth loop
 
+                if (useSoftDeadline &&
+                    std::chrono::steady_clock::now() >= softDeadline &&
+                    ((!useHardDeadline || softDeadline == hardDeadline) ||
+                     (stableBestMoveDepths >= 2 && stableScoreDepths >= 2))) {
+                    break;
+                }
+                } // end iterative-deepening depth loop
 
             const auto end =
                 std::chrono::steady_clock::now();
 
-
             bestCompleted.nodes =
                 context.nodes;
-
 
             bestCompleted.seconds =
                 std::chrono::duration<double>(
@@ -3615,10 +4081,8 @@ namespace chess {
                     start
                 ).count();
 
-
             bestCompleted.stopped =
                 context.stopped;
-
 
             return bestCompleted;
         }
@@ -3639,34 +4103,69 @@ namespace chess {
                 TTCluster{};
         }
 
-
         ttUsed =
             0;
-
 
         ttGeneration =
             0;
 
-
         killerMoves =
         {};
 
-
         historyTable =
         {};
+
+        for (EvalCacheEntry& entry : evaluationCache) {
+            entry = EvalCacheEntry{};
+        }
     }
 
+    void requestSearchStop() {
+        searchStopRequested.store(true, std::memory_order_relaxed);
+    }
+
+    void resetSearchStop() {
+        searchStopRequested.store(false, std::memory_order_relaxed);
+    }
 
     std::size_t transpositionTableSize() {
         return
             ttUsed;
     }
 
-
     SearchResult searchBestMove(
         const Position& pos,
         int maxDepth,
-        const SearchInfoCallback& infoCallback
+        const SearchInfoCallback& infoCallback,
+        const SearchHistory& history
+    ) {
+        if (
+            maxDepth < 1
+            ) {
+            maxDepth =
+                1;
+        }
+
+        return
+            iterativeSearch(
+                pos,
+                maxDepth,
+                false,
+                {},
+                false,
+                {},
+                infoCallback,
+                history,
+                nullptr
+            );
+    }
+
+    SearchResult searchBestMoveProfiled(
+        const Position& pos,
+        int maxDepth,
+        SearchStats& stats,
+        const SearchInfoCallback& infoCallback,
+        const SearchHistory& history
     ) {
         if (
             maxDepth < 1
@@ -3676,21 +4175,29 @@ namespace chess {
         }
 
 
+        stats =
+            SearchStats{};
+
+
         return
             iterativeSearch(
                 pos,
                 maxDepth,
                 false,
                 {},
-                infoCallback
+                false,
+                {},
+                infoCallback,
+                history,
+                &stats
             );
     }
-
 
     SearchResult searchBestMoveTimed(
         const Position& pos,
         int milliseconds,
-        const SearchInfoCallback& infoCallback
+        const SearchInfoCallback& infoCallback,
+        const SearchHistory& history
     ) {
         if (
             milliseconds < 1
@@ -3699,22 +4206,45 @@ namespace chess {
                 1;
         }
 
+        return searchBestMoveTimed(
+            pos,
+            milliseconds,
+            milliseconds,
+            infoCallback,
+            history
+        );
+    }
 
-        const auto deadline =
-            std::chrono::steady_clock::now()
-            +
+    SearchResult searchBestMoveTimed(
+        const Position& pos,
+        int softMilliseconds,
+        int hardMilliseconds,
+        const SearchInfoCallback& infoCallback,
+        const SearchHistory& history
+    ) {
+        softMilliseconds = std::max(1, softMilliseconds);
+        hardMilliseconds = std::max(softMilliseconds, hardMilliseconds);
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto softDeadline =
+            now + std::chrono::milliseconds(softMilliseconds);
+        const auto hardDeadline =
+            now +
             std::chrono::milliseconds(
-                milliseconds
+                hardMilliseconds
             );
-
 
         return
             iterativeSearch(
                 pos,
-                64,
+                MAX_PLY - 1,
                 true,
-                deadline,
-                infoCallback
+                softDeadline,
+                true,
+                hardDeadline,
+                infoCallback,
+                history,
+                nullptr
             );
     }
 

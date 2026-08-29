@@ -2371,18 +2371,19 @@ namespace chess {
                 castlingIndex(pos)
             ];
 
-        if (
-            pos.enPassantSquare >= 0
-            ) {
-            pos.zobristKey ^=
-                ZOBRIST.enPassantFile[
-                    fileOf(
-                        pos.enPassantSquare
-                    )
-                ];
-        }
+            if (
+        pos.enPassantSquare >= 0
+        ) {
+        pos.zobristKey ^=
+            ZOBRIST.enPassantFile[
+                fileOf(
+                    pos.enPassantSquare
+                )
+            ];
     }
 
+
+}
 
     void makeMove(
         Position& pos,
@@ -2533,9 +2534,11 @@ namespace chess {
         // The board/bitboards/occupancy have been restored.
         // Rather than reverse every hash operation manually,
         // restore the exact saved key.
-        pos.zobristKey =
-            undo.zobristKey;
-    }
+            pos.zobristKey =
+        undo.zobristKey;
+
+
+}
 
 
     // ============================================================

@@ -1,4 +1,5 @@
 #include "evaluation.hpp"
+#include "nnue.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3034,6 +3035,27 @@ namespace chess {
             ).finalScore;
     }
 
+    int evaluateActive(
+        const Position& pos
+    ) {
+        if (
+            nnueEnabled() &&
+            nnueLoaded()
+            ) {
+            return
+                evaluateNNUE(
+                    pos
+                );
+        }
+
+
+        return
+            evaluate(
+                pos
+            );
+    }
+
+
     // ============================================================
     // SIDE-TO-MOVE EVALUATION
     // ============================================================
@@ -3041,16 +3063,16 @@ namespace chess {
     int evaluateForSideToMove(
         const Position& pos
     ) {
-        const int whiteScore =
-            evaluate(
+        const int score =
+            evaluateActive(
                 pos
             );
 
 
         return
             pos.whiteToMove
-            ? whiteScore
-            : -whiteScore;
+            ? score
+            : -score;
     }
 
 } // namespace chess
