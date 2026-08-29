@@ -153,6 +153,34 @@ namespace chess {
         int fullmoveNumber = 1;
 
         std::uint64_t zobristKey = 0;
+                // ========================================================
+        // HALFKP-512 INCREMENTAL CACHE
+        // ========================================================
+        //
+        // These are transient evaluation caches. They are not part
+        // of the chess position itself and are not included in FEN
+        // or Zobrist hashing.
+        //
+        // A generation number prevents using accumulators created
+        // with an older/different NNUE network.
+        // ========================================================
+
+        std::array<
+            std::int32_t,
+            512
+        > halfKPWhiteAccumulator{};
+
+        std::array<
+            std::int32_t,
+            512
+        > halfKPBlackAccumulator{};
+
+        int halfKPWhiteKingSquare = -1;
+        int halfKPBlackKingSquare = -1;
+
+        std::uint64_t halfKPGeneration = 0;
+
+        bool halfKPValid = false;
     };
 
     Position startPosition();

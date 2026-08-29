@@ -25,3 +25,26 @@ cmake_install.cmake
 # Misc
 *.log
 *.tmp
+
+# Aider local files
+.aider*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# NNUE generated datasets
+tools/nnue/data/
+
+# NNUE training runs / checkpoints
+tools/nnue/runs/
+
+# Large training artifacts
+*.pgn
+*.pgn.zst
+*.fen
+*.tsv
+*.pt
+
+# Temporary tree dump
+knightbot-tree.txt
