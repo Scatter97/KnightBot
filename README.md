@@ -268,3 +268,9 @@ Current areas of focus include:
 ## Version
 
 **KnightBot v0.10.0**
+
+## CopyRight
+
+Copyright © 2026 Joshua Wang
+All rights reserved.
+This software and its source code may not be copied, modified, distributed, sublicensed, or used for commercial purposes without prior written permission from the copyright holder.
