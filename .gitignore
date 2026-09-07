@@ -48,3 +48,9 @@ tools/nnue/runs/
 
 # Temporary tree dump
 knightbot-tree.txt
+*-diff.txt
+*.patch
+# Patch Forge / local patch artifacts
+.patchforge/
+*-diff.txt
+*.patch
