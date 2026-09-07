@@ -1622,6 +1622,52 @@ namespace chess {
         // MOVE ORDERING
         // ============================================================
 
+        bool qsearchCaptureCannotHaveNegativeSee(
+            const Position& pos,
+            const Move& move,
+            char capturedPiece
+        ) {
+            if (
+                move.promotion ||
+                capturedPiece == '.'
+                ) {
+                return false;
+            }
+
+            const char movingPiece =
+                pos.board[
+                    move.from
+                ];
+
+            if (
+                movingPiece == '.'
+                ) {
+                return false;
+            }
+
+            const int targetRank =
+                rankOf(
+                    move.to
+                );
+
+            if (
+                targetRank == 0 ||
+                targetRank == 7
+                ) {
+                return false;
+            }
+
+            return
+                pieceValue(
+                    capturedPiece
+                )
+                >=
+                pieceValue(
+                    movingPiece
+                );
+        }
+
+
         int moveOrderScore(
             const Position& pos,
             const Move& move,
@@ -2369,16 +2415,26 @@ namespace chess {
                     continue;
                 }
 
+                char capturedPiece =
+                    '.';
+
+                if (
+                    capture
+                    ) {
+                    capturedPiece =
+                        capturedPieceForMove(
+                            pos,
+                            move
+                        );
+                }
+
                 if (
                     capture &&
                     !move.promotion
                     ) {
                     const int gain =
                         pieceValue(
-                            capturedPieceForMove(
-                                pos,
-                                move
-                            )
+                            capturedPiece
                         );
 
                     if (
@@ -2398,23 +2454,32 @@ namespace chess {
                     }
                 }
 
-                const int see =
-                    staticExchangeEvaluation(
-                        pos,
-                        move
-                    );
-
                 if (
-                    see < 0 &&
                     !move.promotion
+                    &&
+                    !qsearchCaptureCannotHaveNegativeSee(
+                        pos,
+                        move,
+                        capturedPiece
+                    )
                     ) {
-                    if (
-                        context.stats != nullptr
-                        ) {
-                        ++context.stats->qsearchSeePrunes;
-                    }
+                    const int see =
+                        staticExchangeEvaluation(
+                            pos,
+                            move
+                        );
 
-                    continue;
+                    if (
+                        see < 0
+                        ) {
+                        if (
+                            context.stats != nullptr
+                            ) {
+                            ++context.stats->qsearchSeePrunes;
+                        }
+
+                        continue;
+                    }
                 }
 
                 tactical.push_back(
@@ -4019,6 +4084,31 @@ namespace chess {
                 current.stopped =
                     false;
 
+
+                if (
+                    bestCompleted.depth > 0 &&
+                    current.hasMove &&
+                    bestCompleted.hasMove &&
+                    sameMove(
+                        current.bestMove,
+                        bestCompleted.bestMove
+                    )
+                    ) {
+                    ++stableBestMoveDepths;
+                }
+                else {
+                    stableBestMoveDepths = 0;
+                }
+
+                if (
+                    bestCompleted.depth > 0 &&
+                    current.score == previousScore
+                    ) {
+                    ++stableScoreDepths;
+                }
+                else {
+                    stableScoreDepths = 0;
+                }
 
                 bestCompleted =
                     current;

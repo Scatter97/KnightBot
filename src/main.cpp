@@ -611,8 +611,10 @@ namespace {
             "  selftest\n"
             "  bench\n"
             "  benchfull\n"
+            "  benchmulti [runs]\n"
             "  bestmove <depth>\n"
             "  think <milliseconds>\n"
+            "  thinkrange <soft_ms> <hard_ms>\n"
             "  playbest <depth>\n"
             "  playtime <milliseconds>\n"
             "  perft <depth>\n"
@@ -2522,6 +2524,317 @@ int main() {
 
         else if (
             command ==
+            "benchmulti"
+            ) {
+            stopAndJoinUciSearch();
+
+            int runs = 5;
+            std::string argument;
+            std::string extraArgument;
+
+            if (input >> argument) {
+                std::size_t consumed = 0;
+
+                try {
+                    runs =
+                        std::stoi(
+                            argument,
+                            &consumed
+                        );
+                }
+                catch (const std::exception&) {
+                    std::cout <<
+                        "Usage: benchmulti [positive run count]\n";
+                    continue;
+                }
+
+                if (
+                    consumed != argument.size()
+                    ||
+                    (input >> extraArgument)
+                    ) {
+                    std::cout <<
+                        "Usage: benchmulti [positive run count]\n";
+                    continue;
+                }
+            }
+
+            if (runs <= 0) {
+                std::cout <<
+                    "Usage: benchmulti [positive run count]\n";
+                continue;
+            }
+
+            if (runs > 100) {
+                std::cout <<
+                    "benchmulti supports at most 100 runs.\n";
+                continue;
+            }
+
+            struct BenchPosition {
+                const char* fen;
+                int depth;
+            };
+
+            const std::vector<BenchPosition> positions{
+                {
+                    "rnbqkbnr/pppppppp/8/8/8/8/"
+                    "PPPPPPPP/RNBQKBNR "
+                    "w KQkq - 0 1",
+                    6
+                },
+                {
+                    "r3k2r/p1ppqpb1/bn2pnp1/"
+                    "3PN3/1p2P3/2N2Q1p/"
+                    "PPPBBPPP/R3K2R "
+                    "w KQkq - 0 1",
+                    5
+                },
+                {
+                    "r1bq1rk1/pp2bppp/2n1pn2/"
+                    "2pp4/3P4/2PBPN2/"
+                    "PP1N1PPP/R1BQ1RK1 "
+                    "w - - 3 9",
+                    6
+                },
+                {
+                    "8/2p5/3p4/1P1P4/"
+                    "2P1k3/4P3/5K2/8 "
+                    "w - - 0 40",
+                    7
+                },
+                {
+                    "4rrk1/1pp2ppp/p1n5/"
+                    "3q4/3P4/P1P1Q3/"
+                    "1P3PPP/2RR2K1 "
+                    "w - - 0 22",
+                    6
+                },
+                {
+                    "2r3k1/5pp1/4p2p/"
+                    "3pP3/3P1P2/6P1/"
+                    "5K1P/2R5 "
+                    "w - - 0 32",
+                    7
+                }
+            };
+
+            const auto checksumMix =
+                [](
+                    std::uint64_t checksum,
+                    std::uint64_t value
+                ) {
+                    checksum ^= value;
+                    checksum *=
+                        1099511628211ULL;
+                    return checksum;
+                };
+
+            std::vector<std::uint64_t> npsValues;
+            npsValues.reserve(
+                static_cast<std::size_t>(runs)
+            );
+
+            std::uint64_t referenceNodes = 0;
+            std::uint64_t referenceChecksum = 0;
+            bool consistent = true;
+            double totalBenchmarkTime = 0.0;
+
+            for (
+                int run = 1;
+                run <= runs;
+                ++run
+                ) {
+                std::uint64_t totalNodes = 0;
+                std::uint64_t checksum =
+                    1469598103934665603ULL;
+
+                const auto start =
+                    std::chrono::steady_clock::now();
+
+                for (
+                    const BenchPosition& bench : positions
+                    ) {
+                    const chess::Position pos =
+                        chess::fromFEN(
+                            bench.fen
+                        );
+
+                    chess::SearchHistory history;
+                    history.push_back(
+                        pos.zobristKey
+                    );
+
+                    chess::clearTranspositionTable();
+                    chess::resetSearchStop();
+
+                    const chess::SearchResult result =
+                        chess::searchBestMove(
+                            pos,
+                            bench.depth,
+                            {},
+                            history
+                        );
+
+                    totalNodes +=
+                        result.nodes;
+
+                    checksum =
+                        checksumMix(
+                            checksum,
+                            static_cast<std::uint64_t>(
+                                result.score + 32000
+                            )
+                        );
+
+                    checksum =
+                        checksumMix(
+                            checksum,
+                            static_cast<std::uint64_t>(
+                                result.bestMove.from + 1
+                            )
+                        );
+
+                    checksum =
+                        checksumMix(
+                            checksum,
+                            static_cast<std::uint64_t>(
+                                result.bestMove.to + 1
+                            )
+                        );
+                }
+
+                const auto end =
+                    std::chrono::steady_clock::now();
+
+                const double seconds =
+                    std::chrono::duration<double>(
+                        end - start
+                    ).count();
+
+                const std::uint64_t nps =
+                    seconds > 0.0
+                    ?
+                    static_cast<std::uint64_t>(
+                        static_cast<double>(
+                            totalNodes
+                        )
+                        /
+                        seconds
+                    )
+                    :
+                    0ULL;
+
+                npsValues.push_back(
+                    nps
+                );
+
+                totalBenchmarkTime +=
+                    seconds;
+
+                if (run == 1) {
+                    referenceNodes =
+                        totalNodes;
+
+                    referenceChecksum =
+                        checksum;
+                }
+                else if (
+                    totalNodes != referenceNodes
+                    ||
+                    checksum != referenceChecksum
+                    ) {
+                    consistent = false;
+                }
+
+                std::cout <<
+                    "Run " <<
+                    run <<
+                    "/" <<
+                    runs <<
+                    ": " <<
+                    std::fixed <<
+                    std::setprecision(3) <<
+                    seconds <<
+                    " s, " <<
+                    nps <<
+                    " NPS\n";
+            }
+
+            std::sort(
+                npsValues.begin(),
+                npsValues.end()
+            );
+
+            const std::size_t middle =
+                npsValues.size() / 2;
+
+            const std::uint64_t medianNps =
+                npsValues.size() % 2 != 0
+                ?
+                npsValues[middle]
+                :
+                (
+                    npsValues[middle - 1]
+                    +
+                    npsValues[middle]
+                )
+                /
+                2ULL;
+
+            const char* evaluator =
+                (
+                    chess::nnueEnabled()
+                    &&
+                    chess::nnueLoaded()
+                )
+                ?
+                "NNUE"
+                :
+                "Handcrafted";
+
+            std::cout <<
+                "\nKnightBot Multi-Run Benchmark\n" <<
+                "Runs:                   " <<
+                runs <<
+                '\n' <<
+                "Nodes per run:          " <<
+                referenceNodes <<
+                '\n' <<
+                "Median NPS:             " <<
+                medianNps <<
+                '\n' <<
+                "Minimum NPS:            " <<
+                npsValues.front() <<
+                '\n' <<
+                "Maximum NPS:            " <<
+                npsValues.back() <<
+                '\n' <<
+                "Checksum:               " <<
+                referenceChecksum <<
+                '\n' <<
+                "Regression consistency: " <<
+                (
+                    consistent
+                    ?
+                    "PASSED"
+                    :
+                    "FAILED"
+                ) <<
+                '\n' <<
+                "Evaluator:              " <<
+                evaluator <<
+                '\n' <<
+                std::fixed <<
+                std::setprecision(3) <<
+                "Total benchmark time:   " <<
+                totalBenchmarkTime <<
+                " s\n";
+        }
+
+
+        else if (
+            command ==
             "benchfull"
             ) {
             stopAndJoinUciSearch();
@@ -2607,6 +2920,57 @@ int main() {
                 chess::searchBestMoveTimed(
                     position,
                     milliseconds
+                );
+
+
+            printHumanSearchResult(
+                position,
+                result
+            );
+        }
+
+
+        // ====================================================
+        // THINK RANGE
+        // ====================================================
+
+        else if (
+            command ==
+            "thinkrange"
+            ) {
+            int softMilliseconds = 0;
+            int hardMilliseconds = 0;
+            std::string extraArgument;
+
+            if (
+                !(input >> softMilliseconds >> hardMilliseconds)
+                ||
+                softMilliseconds < 1
+                ||
+                hardMilliseconds < softMilliseconds
+                ||
+                (input >> extraArgument)
+                ) {
+                std::cout <<
+                    "Usage: thinkrange <soft_ms> <hard_ms>\n";
+
+                continue;
+            }
+
+
+            std::cout <<
+                "KnightBot thinking with soft deadline " <<
+                softMilliseconds <<
+                " ms and hard deadline " <<
+                hardMilliseconds <<
+                " ms...\n";
+
+
+            const SearchResult result =
+                chess::searchBestMoveTimed(
+                    position,
+                    softMilliseconds,
+                    hardMilliseconds
                 );
 
 
