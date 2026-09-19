@@ -111,6 +111,7 @@ else()
     target_compile_options(
         KnightBot
         PRIVATE
+            -mavx2
             $<$<CONFIG:Release>:-O3>
     )
 

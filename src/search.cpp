@@ -36,6 +36,10 @@ namespace chess {
         constexpr int LMR_MIN_DEPTH = 3;
         constexpr int LMR_MIN_MOVE_INDEX = 4;
 
+        constexpr int HISTORY_MAX = 8192;
+        constexpr int HISTORY_BONUS_SCALE = 32;
+        constexpr int HISTORY_MALUS_SCALE = 16;
+
         constexpr int MAX_CHECK_EXTENSIONS = 2;
 
         constexpr int RAZOR_MARGIN_DEPTH_1 = 250;
@@ -863,14 +867,10 @@ namespace chess {
         }
 
 
-        bool isRuleDraw(
+        int repetitionOccurrenceCount(
             const Position& pos,
             const SearchContext& context
         ) {
-            if (pos.halfmoveClock >= 100) {
-                return true;
-            }
-
             int occurrences = 0;
             const std::size_t reversibleSpan =
                 static_cast<std::size_t>(std::max(0, pos.halfmoveClock));
@@ -882,13 +882,60 @@ namespace chess {
             for (std::size_t i = start;
                  i < context.positionHistory.size();
                  ++i) {
-                if (context.positionHistory[i] == pos.zobristKey &&
-                    ++occurrences >= 3) {
-                    return true;
+                if (
+                    context.positionHistory[i] == pos.zobristKey
+                    ) {
+                    ++occurrences;
                 }
             }
 
-            return false;
+            return occurrences;
+        }
+
+
+        int repetitionCycleScore(
+            Position& pos,
+            int ply,
+            SearchContext& context,
+            int occurrences
+        ) {
+            const int staticEval =
+                cachedEvaluateForSideToMove(
+                    pos,
+                    ply,
+                    context
+                );
+
+            // Near-equal positions can still repeat naturally.
+            if (
+                std::abs(staticEval) < 100
+                ) {
+                return 0;
+            }
+
+            // On the second occurrence the draw is not legal yet, but
+            // entering the same cycle again is a warning sign. Use a
+            // modest bias so a clearly winning side prefers progress.
+            if (
+                occurrences == 2
+                ) {
+                return
+                    std::clamp(
+                        -staticEval / 8,
+                        -80,
+                        80
+                    );
+            }
+
+            // Third occurrence is an actual repetition draw. Make that
+            // substantially less attractive to a side that is winning,
+            // while preserving the ability to save a lost game by draw.
+            return
+                std::clamp(
+                    -staticEval / 4,
+                    -180,
+                    180
+                );
         }
 
 
@@ -1943,6 +1990,72 @@ namespace chess {
         // KILLER / HISTORY UPDATE
         // ============================================================
 
+        void updateHistory(
+            int& history,
+            int bonus
+        ) {
+            bonus =
+                std::clamp(
+                    bonus,
+                    -HISTORY_MAX,
+                    HISTORY_MAX
+                );
+
+            history +=
+                bonus -
+                history *
+                std::abs(bonus) /
+                HISTORY_MAX;
+
+            history =
+                std::clamp(
+                    history,
+                    -HISTORY_MAX,
+                    HISTORY_MAX
+                );
+        }
+
+
+        void recordHistoryMalus(
+            const Position& pos,
+            const Move& move,
+            int depth
+        ) {
+            if (
+                isCapture(
+                    pos,
+                    move
+                )
+                ||
+                move.promotion
+                ) {
+                return;
+            }
+
+            const int side =
+                pos.whiteToMove
+                ? 0
+                : 1;
+
+            int& history =
+                historyTable[
+                    side
+                ][
+                    move.from
+                ][
+                    move.to
+                ];
+
+            const int malus =
+                -(depth * depth * HISTORY_MALUS_SCALE);
+
+            updateHistory(
+                history,
+                malus
+            );
+        }
+
+
         void recordKiller(
             const Position& pos,
             const Move& move,
@@ -2010,18 +2123,16 @@ namespace chess {
                 ];
 
 
-                    history +=
+                    const int bonus =
                         depth *
-                        depth;
+                        depth *
+                        HISTORY_BONUS_SCALE;
 
 
-                    if (
-                        history >
-                        100000
-                        ) {
-                        history /=
-                            2;
-                    }
+                    updateHistory(
+                        history,
+                        bonus
+                    );
         }
 
 
@@ -2196,8 +2307,28 @@ namespace chess {
             int qply,
             SearchContext& context
         ) {
-            if (isRuleDraw(pos, context)) {
+            if (
+                pos.halfmoveClock >= 100
+                ) {
                 return 0;
+            }
+
+            const int repetitionOccurrences =
+                repetitionOccurrenceCount(
+                    pos,
+                    context
+                );
+
+            if (
+                repetitionOccurrences >= 2
+                ) {
+                return
+                    repetitionCycleScore(
+                        pos,
+                        ply,
+                        context,
+                        repetitionOccurrences
+                    );
             }
 
             // ========================================================
@@ -2596,8 +2727,28 @@ namespace chess {
             bool allowNull,
             int checkExtensions
         ) {
-            if (isRuleDraw(pos, context)) {
+            if (
+                pos.halfmoveClock >= 100
+                ) {
                 return 0;
+            }
+
+            const int repetitionOccurrences =
+                repetitionOccurrenceCount(
+                    pos,
+                    context
+                );
+
+            if (
+                repetitionOccurrences >= 2
+                ) {
+                return
+                    repetitionCycleScore(
+                        pos,
+                        ply,
+                        context,
+                        repetitionOccurrences
+                    );
             }
 
             // ========================================================
@@ -3311,6 +3462,24 @@ namespace chess {
                         ++context.stats->betaCutoffs;
                     }
 
+                    if (
+                        quiet
+                        ) {
+                        for (
+                            int failedIndex = 0;
+                            failedIndex < moveIndex;
+                            ++failedIndex
+                            ) {
+                            recordHistoryMalus(
+                                pos,
+                                moves[
+                                    failedIndex
+                                ],
+                                depth
+                            );
+                        }
+                    }
+
                     recordKiller(
                         pos,
                         move,
@@ -3495,10 +3664,34 @@ namespace chess {
                 return result;
             }
 
-            if (isRuleDraw(pos, context)) {
+            if (
+                pos.halfmoveClock >= 100
+                ) {
                 result.hasMove = true;
                 result.bestMove = moves.front();
                 result.score = 0;
+                result.pv = {result.bestMove};
+                return result;
+            }
+
+            const int repetitionOccurrences =
+                repetitionOccurrenceCount(
+                    pos,
+                    context
+                );
+
+            if (
+                repetitionOccurrences >= 2
+                ) {
+                result.hasMove = true;
+                result.bestMove = moves.front();
+                result.score =
+                    repetitionCycleScore(
+                        pos,
+                        0,
+                        context,
+                        repetitionOccurrences
+                    );
                 result.pv = {result.bestMove};
                 return result;
             }
@@ -3878,6 +4071,7 @@ namespace chess {
 
             int stableBestMoveDepths = 0;
             int stableScoreDepths = 0;
+            int openingStableScoreDepths = 0;
 
             for (
                 int depth = 1;
@@ -4102,12 +4296,26 @@ namespace chess {
 
                 if (
                     bestCompleted.depth > 0 &&
-                    current.score == previousScore
+                    std::abs(current.score - previousScore) <= 15
                     ) {
                     ++stableScoreDepths;
                 }
                 else {
                     stableScoreDepths = 0;
+                }
+
+                // Opening-only relaxed score stability. Small evaluation
+                // movement is normal between iterative-deepening depths and
+                // should not force an obvious opening move to consume its
+                // entire normal time budget.
+                if (
+                    bestCompleted.depth > 0 &&
+                    std::abs(current.score - previousScore) <= 15
+                    ) {
+                    ++openingStableScoreDepths;
+                }
+                else {
+                    openingStableScoreDepths = 0;
                 }
 
                 bestCompleted =
@@ -4147,6 +4355,20 @@ namespace chess {
                     )
                     >=
                     MATE_THRESHOLD
+                    ) {
+                    break;
+                }
+
+                // In the first ten moves, allow an obviously stable
+                // position to finish before the normal soft deadline.
+                // Never do this immediately: require at least 750 ms of
+                // actual search plus several agreeing completed depths.
+                if (
+                    useSoftDeadline &&
+                    rootPosition.fullmoveNumber <= 10 &&
+                    current.seconds >= 0.75 &&
+                    stableBestMoveDepths >= 3 &&
+                    openingStableScoreDepths >= 2
                     ) {
                     break;
                 }

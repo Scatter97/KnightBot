@@ -158,7 +158,7 @@ namespace chess {
         const Position& pos,
         int softMilliseconds,
         int hardMilliseconds,
-        const SearchInfoCallback& infoCallback,
+        const SearchInfoCallback& infoCallback = {},
         const SearchHistory& history = {}
     );
 

@@ -44,6 +44,97 @@ namespace {
     std::mutex uciOutputMutex;
     std::thread uciSearchThread;
 
+    constexpr const char* DEFAULT_NNUE_FILENAME =
+        "knightbot-halfkp512-5m-clamp2000-v1.nnue";
+
+    std::string defaultNNUEPath =
+        std::string("networks/") + DEFAULT_NNUE_FILENAME;
+
+
+    void loadDefaultNNUE(
+        const char* executablePath
+    ) {
+        chess::setNNUEEnabled(true);
+
+        std::vector<std::filesystem::path> candidates;
+
+        candidates.push_back(
+            std::filesystem::current_path() /
+            "networks" /
+            DEFAULT_NNUE_FILENAME
+        );
+
+        if (
+            executablePath != nullptr &&
+            executablePath[0] != '\0'
+            ) {
+            const std::filesystem::path binaryPath =
+                std::filesystem::absolute(executablePath);
+
+            const std::filesystem::path binaryDirectory =
+                binaryPath.parent_path();
+
+            candidates.push_back(
+                binaryDirectory /
+                "networks" /
+                DEFAULT_NNUE_FILENAME
+            );
+
+            candidates.push_back(
+                binaryDirectory /
+                ".." /
+                "networks" /
+                DEFAULT_NNUE_FILENAME
+            );
+
+            candidates.push_back(
+                binaryDirectory /
+                ".." /
+                ".." /
+                "networks" /
+                DEFAULT_NNUE_FILENAME
+            );
+        }
+
+        for (
+            const std::filesystem::path& candidate :
+            candidates
+            ) {
+            std::error_code errorCode;
+
+            if (
+                !std::filesystem::is_regular_file(
+                    candidate,
+                    errorCode
+                )
+                ) {
+                continue;
+            }
+
+            std::string error;
+            const std::filesystem::path resolved =
+                std::filesystem::weakly_canonical(
+                    candidate,
+                    errorCode
+                );
+
+            const std::string path =
+                errorCode
+                ? candidate.string()
+                : resolved.string();
+
+            if (
+                chess::loadNNUE(
+                    path,
+                    &error
+                )
+                ) {
+                defaultNNUEPath = path;
+                return;
+            }
+        }
+    }
+
     void stopAndJoinUciSearch() {
         if (uciSearchThread.joinable()) {
             chess::requestSearchStop();
@@ -951,29 +1042,36 @@ namespace {
 
 
             if (
-                moveNumber <= 10
+                moveNumber <= 8
                 ) {
                 expectedMoves =
-                    24;
+                    60;
             }
 
             else if (
-                moveNumber <= 25
+                moveNumber <= 14
                 ) {
                 expectedMoves =
-                    14;
+                    50;
             }
 
             else if (
-                moveNumber <= 40
+                moveNumber <= 30
                 ) {
                 expectedMoves =
-                    12;
+                    36;
+            }
+
+            else if (
+                moveNumber <= 45
+                ) {
+                expectedMoves =
+                    28;
             }
 
             else {
                 expectedMoves =
-                    10;
+                    22;
             }
         }
 
@@ -1039,36 +1137,51 @@ namespace {
 
 
         if (
-            moveNumber <= 10
+            moveNumber <= 8
             ) {
+            // Opening moves are usually comparatively easy to resolve.
+            // Keep these searches short instead of burning a large chunk
+            // of the clock before the position becomes complicated.
             moveTime =
                 (
                     moveTime *
-                    85
+                    25
                     )
                 /
                 100;
         }
 
         else if (
-            moveNumber <= 25
+            moveNumber <= 14
             ) {
             moveTime =
                 (
                     moveTime *
-                    135
+                    50
                     )
                 /
                 100;
         }
 
         else if (
-            moveNumber <= 40
+            moveNumber <= 30
             ) {
             moveTime =
                 (
                     moveTime *
-                    120
+                    90
+                    )
+                /
+                100;
+        }
+
+        else if (
+            moveNumber <= 45
+            ) {
+            moveTime =
+                (
+                    moveTime *
+                    100
                     )
                 /
                 100;
@@ -1078,7 +1191,7 @@ namespace {
             moveTime =
                 (
                     moveTime *
-                    105
+                    90
                     )
                 /
                 100;
@@ -1103,6 +1216,67 @@ namespace {
 
 
         // ========================================================
+        // LOW-CLOCK CONSERVATION
+        // ========================================================
+        //
+        // Start protecting the clock well before emergency mode.
+        // At fast controls such as 10+0.1, spending 300-400 ms per
+        // move with only a few seconds left drains the reserve much
+        // faster than the increment can replace it.
+        //
+        // A larger increment raises the cap automatically, so controls
+        // such as 5+3 are not accidentally treated like sudden death.
+        //
+        // ========================================================
+
+        if (
+            remainingTime > 1000 &&
+            remainingTime <= 8000
+            ) {
+            int conservationCap =
+                200;
+
+            if (
+                remainingTime <= 2000
+                ) {
+                conservationCap =
+                    110;
+            }
+
+            else if (
+                remainingTime <= 3000
+                ) {
+                conservationCap =
+                    125;
+            }
+
+            else if (
+                remainingTime <= 5000
+                ) {
+                conservationCap =
+                    155;
+            }
+
+            const int incrementAwareCap =
+                increment > 0
+                ? (increment * 4) / 5
+                : 0;
+
+            conservationCap =
+                std::max(
+                    conservationCap,
+                    incrementAwareCap
+                );
+
+            maximumMoveTime =
+                std::min(
+                    maximumMoveTime,
+                    conservationCap
+                );
+        }
+
+
+        // ========================================================
         // LOW-TIME EMERGENCY MODE
         // ========================================================
 
@@ -1115,7 +1289,7 @@ namespace {
                     std::max(
                         1,
                         remainingTime /
-                        6
+                        5
                     )
                 );
         }
@@ -1130,7 +1304,7 @@ namespace {
                     std::max(
                         1,
                         remainingTime /
-                        10
+                        5
                     )
                 );
         }
@@ -1145,7 +1319,7 @@ namespace {
                     std::max(
                         1,
                         remainingTime /
-                        15
+                        6
                     )
                 );
         }
@@ -1158,12 +1332,259 @@ namespace {
             );
 
 
+        // ========================================================
+        // LOW-TIME MINIMUM ALLOCATION
+        // ========================================================
+        //
+        // The normal opening allocation can become too small when
+        // almost no clock remains. Give the search a small minimum
+        // amount of time so it can still reach a useful depth while
+        // remaining safely below the emergency hard limit.
+        //
+        // Approximate targets:
+        //
+        //   800 ms remaining -> 66 ms
+        //   400 ms remaining -> 33 ms
+        //   150 ms remaining -> 15 ms
+        //
+        // ========================================================
+
+        int minimumMoveTime =
+            0;
+
+
+        if (
+            remainingTime <= 150
+            ) {
+            minimumMoveTime =
+                std::max(
+                    8,
+                    remainingTime / 8
+                );
+        }
+
+        else if (
+            remainingTime <= 400
+            ) {
+            minimumMoveTime =
+                std::max(
+                    15,
+                    remainingTime / 6
+                );
+        }
+
+        else if (
+            remainingTime <= 1000
+            ) {
+            minimumMoveTime =
+                std::max(
+                    30,
+                    remainingTime / 6
+                );
+        }
+
+
+        if (
+            minimumMoveTime > 0
+            ) {
+            moveTime =
+                std::max(
+                    moveTime,
+                    std::min(
+                        minimumMoveTime,
+                        maximumMoveTime
+                    )
+                );
+        }
+
+
         return
             std::max(
                 1,
                 moveTime
             );
     }
+
+
+    // ============================================================
+    // UCI HARD TIME LIMIT
+    // ============================================================
+    //
+    // The normal move allocation is the soft target. This function
+    // places an additional stage-aware ceiling on how long a difficult
+    // or unstable position is allowed to continue toward the hard
+    // deadline.
+    //
+    // With 600 seconds remaining the approximate caps are:
+    //
+    //   moves  1-8  :  4.5 s
+    //   moves  9-14 :  7.5 s
+    //   moves 15-30 : 12.0 s
+    //
+    // Later in the game we return to the normal adaptive soft*2 rule.
+    // The proportional caps automatically become smaller as the clock
+    // runs down.
+    //
+    // ============================================================
+
+    int calculateHardMoveTime(
+        const Position& position,
+        int allocatedTime,
+        int whiteTime,
+        int blackTime,
+        int whiteIncrement,
+        int blackIncrement
+    ) {
+        const int remainingTime =
+            position.whiteToMove
+            ? whiteTime
+            : blackTime;
+
+        const int increment =
+            position.whiteToMove
+            ? whiteIncrement
+            : blackIncrement;
+
+
+        if (
+            remainingTime < 0
+            ) {
+            return
+                std::max(
+                    allocatedTime,
+                    allocatedTime * 2
+                );
+        }
+
+
+        const int moveNumber =
+            position.fullmoveNumber;
+
+
+        int stageCap;
+
+
+        if (
+            moveNumber <= 8
+            ) {
+            stageCap =
+                std::clamp(
+                    remainingTime / 133,
+                    150,
+                    5000
+                );
+        }
+
+        else if (
+            moveNumber <= 14
+            ) {
+            stageCap =
+                std::clamp(
+                    remainingTime / 80,
+                    250,
+                    8000
+                );
+        }
+
+        else if (
+            moveNumber <= 30
+            ) {
+            stageCap =
+                std::clamp(
+                    remainingTime / 50,
+                    400,
+                    15000
+                );
+        }
+
+        else {
+            stageCap =
+                std::max(
+                    allocatedTime,
+                    remainingTime / 8
+                );
+        }
+
+
+        const int adaptiveHardTime =
+            std::max(
+                allocatedTime + 50,
+                allocatedTime * 2
+            );
+
+
+        // ========================================================
+        // LOW-CLOCK HARD CAP
+        // ========================================================
+        //
+        // The hard deadline must conserve clock too. Otherwise an
+        // unstable search can ignore the conservative soft allocation
+        // and continue consuming several tenths of a second per move.
+        //
+        // ========================================================
+
+        int lowClockHardCap =
+            std::numeric_limits<int>::max();
+
+        if (
+            remainingTime > 1000 &&
+            remainingTime <= 8000
+            ) {
+            lowClockHardCap =
+                250;
+
+            if (
+                remainingTime <= 2000
+                ) {
+                lowClockHardCap =
+                    140;
+            }
+
+            else if (
+                remainingTime <= 3000
+                ) {
+                lowClockHardCap =
+                    155;
+            }
+
+            else if (
+                remainingTime <= 5000
+                ) {
+                lowClockHardCap =
+                    180;
+            }
+
+            if (
+                increment > 0
+                ) {
+                lowClockHardCap =
+                    std::max(
+                        lowClockHardCap,
+                        increment + 50
+                    );
+            }
+        }
+
+
+        const int finalHardCap =
+            std::min(
+                stageCap,
+                lowClockHardCap
+            );
+
+
+        // A hard deadline can never be earlier than the soft deadline.
+        return
+            std::max(
+                allocatedTime,
+                std::min(
+                    adaptiveHardTime,
+                    finalHardCap
+                )
+            );
+    }
+
+
     // ============================================================
 // UCI GO
 // ============================================================
@@ -1373,7 +1794,14 @@ namespace {
                     chess::searchBestMoveTimed(
                         searchPosition,
                         allocatedTime,
-                        std::max(allocatedTime, allocatedTime * 2),
+                        calculateHardMoveTime(
+                            searchPosition,
+                            allocatedTime,
+                            whiteTime,
+                            blackTime,
+                            whiteIncrement,
+                            blackIncrement
+                        ),
                         infoCallback,
                         searchHistory
                     );
@@ -1568,7 +1996,16 @@ void printEvaluationBreakdown(
         << std::noshowpos
         << '\n';
 }
-int main() {
+int main(
+    int argc,
+    char* argv[]
+) {
+
+    loadDefaultNNUE(
+        argc > 0
+        ? argv[0]
+        : nullptr
+    );
 
     Position position =
         chess::startPosition();
@@ -1686,8 +2123,10 @@ int main() {
 
 
             std::cout <<
-                "option name UseNNUE type check default false\n"
-                "option name EvalFile type string default <empty>\n";
+                "option name UseNNUE type check default true\n"
+                "option name EvalFile type string default " <<
+                defaultNNUEPath <<
+                '\n';
 
 
             std::cout <<
